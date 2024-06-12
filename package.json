@@ -1,9 +1,9 @@
 {
-  "name": "electron-vue-vite",
+  "name": "wechat_wcf",
   "version": "28.1.0",
   "main": "dist-electron/main/index.js",
   "description": "Really simple Electron + Vue + Vite boilerplate.",
-  "author": "草鞋没号 <308487730@qq.com>",
+  "author": "Forget <781306919@qq.com>",
   "license": "MIT",
   "private": true,
   "keywords": [
@@ -34,5 +34,8 @@
     "vite-plugin-electron-renderer": "^0.14.5",
     "vue": "^3.4.21",
     "vue-tsc": "^2.0.6"
+  },
+  "dependencies": {
+    "ant-design-vue": "^4.2.1"
   }
 }
