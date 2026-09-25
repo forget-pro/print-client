@@ -5,6 +5,7 @@ import PDFDocument from "pdfkit";
 import sharp from "sharp";
 import { imageSize } from "image-size";
 import { imageSizeFromFile } from "image-size/fromFile";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { fetchPageImages } from "./fetch-images";
 import { layoutImagePages } from "./pdf-layout";
@@ -148,8 +149,8 @@ async function createWindow() {
   const viewerLaunch = launchImages.length === 1;
   win = new BrowserWindow({
     title: "图片打印",
-    width: 1200,
-    height: 800,
+    width: 1320,
+    height: 880,
     backgroundColor: viewerLaunch ? "#2a2c31" : "#eef1f6",
     icon: path.join(process.env.VITE_PUBLIC, "logo.png"),
     webPreferences: {
@@ -202,24 +203,44 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+function isListedFile(filePath: string) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function collectImages(inputs: string[]) {
   const files: string[] = [];
+  const seen = new Set<string>();
+  const add = (filePath: string) => {
+    const key = process.platform === "win32" ? filePath.toLowerCase() : filePath;
+    if (seen.has(key) || !IMAGE_EXT.test(path.basename(filePath)) || !isListedFile(filePath)) return;
+    seen.add(key);
+    files.push(filePath);
+  };
   for (let i = 0; i < inputs.length; i++) {
     const item = inputs[i];
-    let stat: fs.Stats;
+    let info: fs.Stats;
     try {
-      stat = fs.statSync(item);
+      info = fs.statSync(item);
     } catch {
       continue;
     }
-    if (stat.isDirectory()) {
-      const entries = fs.readdirSync(item, { withFileTypes: true });
-      for (let j = 0; j < entries.length; j++) {
-        const entry = entries[j];
-        if (entry.isFile() && IMAGE_EXT.test(entry.name)) files.push(path.join(item, entry.name));
-      }
-    } else if (IMAGE_EXT.test(item)) {
-      files.push(item);
+    if (!info.isDirectory()) {
+      add(item);
+      continue;
+    }
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(item);
+    } catch {
+      continue;
+    }
+    for (let j = 0; j < names.length; j++) {
+      if (!IMAGE_EXT.test(names[j])) continue;
+      add(path.join(item, names[j]));
     }
   }
   return files;
@@ -235,7 +256,7 @@ ipcMain.handle("openDialogSync", () => {
     ],
     properties: ["openFile", "openDirectory", "multiSelections"],
   });
-  if (!result?.length) return [];
+  if (!result?.length) return null;
   return collectImages(result);
 });
 
@@ -376,7 +397,20 @@ async function renderPdf(file: {
   return filepath;
 }
 
-function printPdfFile(filepath: string, copies = 1, deviceName = "") {
+type PrintJob = {
+  copies?: number;
+  deviceName?: string;
+  grayscale?: boolean;
+  duplex?: boolean;
+  duplexMode?: "longEdge" | "shortEdge";
+  collate?: boolean;
+  dpi?: number;
+  paperWidth?: number;
+  paperHeight?: number;
+};
+
+function printPdfFile(filepath: string, copies: number | PrintJob = 1, deviceName = "") {
+  const job: PrintJob = typeof copies === "number" ? { copies, deviceName } : copies;
   return new Promise((resolve, reject) => {
     const printWin = new BrowserWindow({
       show: false,
@@ -398,11 +432,24 @@ function printPdfFile(filepath: string, copies = 1, deviceName = "") {
     printWin.webContents.once("did-finish-load", () => {
       clearTimeout(loadTimer);
       const options: Electron.WebContentsPrintOptions = {
-        silent: false,
+        silent: true,
         printBackground: true,
-        copies: Math.min(99, Math.max(1, Math.round(copies) || 1)),
+        copies: Math.min(99, Math.max(1, Math.round(Number(job.copies)) || 1)),
       };
-      if (deviceName) options.deviceName = deviceName;
+      if (job.deviceName) options.deviceName = job.deviceName;
+      if (job.grayscale) options.color = false;
+      if (job.duplex === true) options.duplexMode = job.duplexMode === "shortEdge" ? "shortEdge" : "longEdge";
+      if (job.duplex === false) options.duplexMode = "simplex";
+      if (typeof job.collate === "boolean") options.collate = job.collate;
+      if (job.dpi) options.dpi = { horizontal: job.dpi, vertical: job.dpi };
+      if (job.paperWidth && job.paperHeight) {
+        const micron = 25400 / 72;
+        options.margins = { marginType: "none" };
+        options.pageSize = {
+          width: Math.round(job.paperWidth * micron),
+          height: Math.round(job.paperHeight * micron),
+        };
+      }
       printWin.webContents.print(options, (success, reason) => {
         const cancelled = !success && /cancel/i.test(String(reason || ""));
         if (success || cancelled || !reason) finish(undefined, cancelled);
@@ -646,11 +693,101 @@ ipcMain.handle("install_update", () => {
   autoUpdater.quitAndInstall(false, true);
 });
 
+function finite(value: unknown, min: number, max: number) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
+}
+
+async function composePrintPdf(payload: {
+  grayscale?: boolean;
+  paperWidth?: number;
+  paperHeight?: number;
+  clip?: { x?: number; y?: number; w?: number; h?: number };
+  sheets?: Array<Array<{ jpeg?: string; x?: number; y?: number; w?: number; h?: number }>>;
+}) {
+  const paperWidth = finite(payload.paperWidth, 200, 2000);
+  const paperHeight = finite(payload.paperHeight, 200, 2000);
+  const sheets = Array.isArray(payload.sheets) ? payload.sheets.slice(0, 80) : [];
+  if (!sheets.length) throw new Error("没有要打印的页面");
+  const clip = payload.clip || {};
+  const doc = new PDFDocument({ autoFirstPage: false, margin: 0 });
+  const filepath = path.join(os.tmpdir(), `pic-print-${generateRandomString()}.pdf`);
+  const outputStream = fs.createWriteStream(filepath);
+  const finished = new Promise((resolve, reject) => {
+    outputStream.on("finish", () => resolve(filepath));
+    outputStream.on("error", reject);
+  });
+  doc.pipe(outputStream);
+  for (const sheet of sheets) {
+    doc.addPage({ size: [paperWidth, paperHeight], margin: 0 });
+    doc.save();
+    doc.rect(
+      finite(clip.x, 0, paperWidth),
+      finite(clip.y, 0, paperHeight),
+      finite(clip.w, 1, paperWidth),
+      finite(clip.h, 1, paperHeight),
+    ).clip();
+    const cells = Array.isArray(sheet) ? sheet.slice(0, 16) : [];
+    for (const cell of cells) {
+      const jpeg = String(cell?.jpeg || "");
+      if (!jpeg || jpeg.length > 12_000_000) continue;
+      let image: Buffer = Buffer.from(jpeg, "base64");
+      if (payload.grayscale) image = await sharp(image).grayscale().jpeg({ quality: 90 }).toBuffer();
+      doc.image(image, finite(cell.x, -paperWidth, paperWidth * 2), finite(cell.y, -paperHeight, paperHeight * 2), {
+        width: finite(cell.w, 1, paperWidth * 8),
+        height: finite(cell.h, 1, paperHeight * 8),
+      });
+    }
+    doc.restore();
+  }
+  doc.end();
+  await finished;
+  return filepath;
+}
+
+ipcMain.handle("open_printer_properties", async (_event, deviceName: string) => {
+  const name = String(deviceName || "").trim();
+  if (!name) throw new Error("请先选择一台打印机");
+  await new Promise<void>((resolve, reject) => {
+    const child = process.platform === "win32"
+      ? spawn("rundll32.exe", ["printui.dll,PrintUIEntry", "/e", "/n", name], { detached: true, stdio: "ignore", windowsHide: true })
+      : process.platform === "darwin"
+        ? spawn("open", ["x-apple.systempreferences:com.apple.Printers-Settings.extension"], { detached: true, stdio: "ignore" })
+        : spawn("system-config-printer", [], { detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+});
+
 ipcMain.handle("print_pdf", async (_event, data) => {
   const payload = JSON.parse(data);
-  if (payload?.path) return printPdfFile(assertPreviewPdf(payload.path));
+  const copies = Number(payload?.copies) || 1;
+  const deviceName = payload?.deviceName || "";
+  if (Array.isArray(payload?.sheets)) {
+    const filepath = await composePrintPdf(payload);
+    try {
+      return await printPdfFile(filepath, {
+        copies,
+        deviceName,
+        grayscale: Boolean(payload.grayscale),
+        duplex: Boolean(payload.duplex),
+        duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
+        collate: Boolean(payload.collate),
+        dpi: payload.quality === "high" ? 300 : 150,
+        paperWidth: Number(payload.paperWidth) || undefined,
+        paperHeight: Number(payload.paperHeight) || undefined,
+      });
+    } finally {
+      fs.promises.unlink(filepath).catch(() => {});
+    }
+  }
+  if (payload?.path) return printPdfFile(assertPreviewPdf(payload.path), copies, deviceName);
   const result = await ensurePdf(payload);
-  return printPdfFile(result.path);
+  return printPdfFile(result.path, copies, deviceName);
 });
 
 ipcMain.handle("fetch_page_images", async (event, pageUrl: string) => {

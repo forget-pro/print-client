@@ -564,9 +564,10 @@ async function addImages() {
     return;
   }
   const picked = await window.ipcRenderer.invoke("openDialogSync");
-  const images = (picked || []).filter((item) => IMAGE_EXT.test(item));
+  if (!picked) return;
+  const images = picked.filter((item) => IMAGE_EXT.test(item));
   if (!images.length) {
-    if (picked?.length) message.warning("只支持 JPG、JPEG、PNG、WebP 图片");
+    message.warning("这个文件夹里没有 JPG、JPEG、PNG、WebP 图片");
     return;
   }
   const start = files.value.length;

@@ -541,7 +541,12 @@ async function opendir() {
     return;
   }
   const res = await window.ipcRenderer.invoke("openDialogSync");
-  appendFiles(res || []);
+  if (!res) return;
+  if (!res.length) {
+    message.warning("这个文件夹里没有 JPG、JPEG、PNG、WebP 图片");
+    return;
+  }
+  appendFiles(res);
 }
 
 function dedupe() {

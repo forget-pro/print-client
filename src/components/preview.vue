@@ -21,7 +21,7 @@
           <span>{{ Math.round(zoom * 100) }}%</span>
           <button type="button" :disabled="zoomIndex >= zoomSteps.length - 1 || loading" @click="changeZoom(1)">＋</button>
         </div>
-        <a-button type="primary" :loading="printing" :disabled="!filePath || loading" @click="printPdf">
+        <a-button type="primary" :disabled="!filePath || loading" @click="printOpen = true">
           <template #icon><printer-outlined /></template>
           打印
         </a-button>
@@ -38,14 +38,15 @@
         class="sheet"
       />
     </main>
+    <print-dialog v-model:open="printOpen" :file-path="filePath" :current-page="currentPage" />
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { message } from "ant-design-vue";
 import { LeftOutlined, PrinterOutlined } from "@ant-design/icons-vue";
+import PrintDialog from "./print-dialog.vue";
 import * as pdfjs from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -58,7 +59,7 @@ const router = useRouter();
 const pages = ref([]);
 const loading = ref(true);
 const error = ref("");
-const printing = ref(false);
+const printOpen = ref(false);
 const filePath = ref("");
 const zoom = ref(1);
 const currentPage = ref(1);
@@ -174,18 +175,6 @@ onBeforeUnmount(() => {
   pdfDoc?.destroy?.();
 });
 
-async function printPdf() {
-  if (!filePath.value || printing.value) return;
-  printing.value = true;
-  try {
-    const result = await window.ipcRenderer.invoke("print_pdf", JSON.stringify({ path: filePath.value }));
-    if (!result?.cancelled) message.success("已提交打印");
-  } catch {
-    message.error("打印失败，请稍后重试");
-  } finally {
-    printing.value = false;
-  }
-}
 </script>
 
 <style scoped>
