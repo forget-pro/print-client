@@ -5,10 +5,20 @@
         <button type="button" class="icon" title="返回" @click="cancel">
           <svg viewBox="0 0 24 24"><path d="M14.5 6.5 8 12l6.5 5.5" /></svg>
         </button>
-        <button type="button" class="text" @click="addImages" v-if="!fromPrint">
-          <svg viewBox="0 0 24 24"><path d="M4 8.5h5l1.5-2H20v11H4z" /></svg>
-          添加
-        </button>
+        <div class="save add-picker" v-if="!fromPrint">
+          <button type="button" class="text" @click="addOpen = !addOpen">
+            <svg viewBox="0 0 24 24"><path d="M4 8.5h5l1.5-2H20v11H4z" /></svg>
+            添加
+            <svg class="chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <template v-if="addOpen">
+            <div class="mask" @click="addOpen = false" />
+            <div class="menu">
+              <button type="button" @click="addImages('file')">选择图片</button>
+              <button type="button" @click="addImages('directory')">选择文件夹</button>
+            </div>
+          </template>
+        </div>
       </div>
       <div class="filename" :title="title">{{ title }}</div>
       <div class="side end">
@@ -93,7 +103,7 @@
     >
       <div v-if="status && !previewUrl" class="empty">
         <p class="status">{{ status }}</p>
-        <button v-if="sessionReady" type="button" class="text solid" @click="addImages">
+        <button v-if="sessionReady" type="button" class="text solid" @click="addImages('file')">
           <svg viewBox="0 0 24 24"><path d="M4 8.5h5l1.5-2H20v11H4z" /></svg>
           添加图片
         </button>
@@ -176,6 +186,7 @@ const files = ref([]);
 const current = ref(0);
 const fromPrint = ref(false);
 const saveOpen = ref(false);
+const addOpen = ref(false);
 const fileBytes = ref(0);
 const zoomMode = ref("fit");
 const scale = ref(1);
@@ -558,16 +569,18 @@ function cancel() {
   router.push("/");
 }
 
-async function addImages() {
+async function addImages(kind = "file") {
+  addOpen.value = false;
   if (!window.ipcRenderer) {
     message.error("无法打开文件选择");
     return;
   }
-  const picked = await window.ipcRenderer.invoke("openDialogSync");
+  const directory = kind === "directory";
+  const picked = await window.ipcRenderer.invoke("openDialogSync", directory ? "directory" : "file");
   if (!picked) return;
   const images = picked.filter((item) => IMAGE_EXT.test(item));
   if (!images.length) {
-    message.warning("这个文件夹里没有 JPG、JPEG、PNG、WebP 图片");
+    message.warning(directory ? "这个文件夹里没有 JPG、JPEG、PNG、WebP 图片" : "只支持 JPG、JPEG、PNG、WebP 图片");
     return;
   }
   const start = files.value.length;
@@ -801,6 +814,11 @@ onBeforeUnmount(() => {
 .save .chevron {
   width: 14px;
   height: 14px;
+}
+
+.add-picker .menu {
+  right: auto;
+  left: 0;
 }
 
 .save .mask {

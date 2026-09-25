@@ -10,10 +10,23 @@
     <section class="toolbar">
       <div class="toolbar-row">
         <div class="actions">
-          <a-button type="primary" ghost @click="opendir">
-            <template #icon><folder-open-outlined /></template>
-            添加图片
-          </a-button>
+          <span class="add-split">
+            <a-button type="primary" ghost @click="opendir('file')">
+              <template #icon><folder-open-outlined /></template>
+              添加图片
+            </a-button>
+            <a-dropdown v-model:open="addMenuOpen" placement="bottomLeft" trigger="click">
+              <a-button type="primary" ghost class="add-caret" aria-label="选择文件夹">
+                <down-outlined />
+              </a-button>
+              <template #overlay>
+                <a-menu @click="onAddMenu">
+                  <a-menu-item key="file">选择图片</a-menu-item>
+                  <a-menu-item key="directory">选择文件夹</a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
+          </span>
           <a-button @click="openFetch">
             <template #icon><link-outlined /></template>
             抓取网页
@@ -106,10 +119,10 @@
     <p class="hint">拖拽卡片可以调整打印顺序</p>
 
     <main class="stage">
-      <div v-if="!state.fileList.length" class="empty" @click="opendir">
+      <div v-if="!state.fileList.length" class="empty" @click="opendir('file')">
         <inbox-outlined />
         <strong>把图片拖到这里</strong>
-        <span>也可以点击「添加图片」，或直接选择文件夹。支持 JPG、JPEG、PNG、WebP</span>
+        <span>点击「添加图片」选择图片，右侧箭头可以选择文件夹。支持 JPG、JPEG、PNG、WebP</span>
       </div>
 
       <VueDraggable
@@ -252,12 +265,13 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { VueDraggable } from "vue-draggable-plus";
 import {
   ClearOutlined,
   DeleteOutlined,
+  DownOutlined,
   EditOutlined,
   EyeOutlined,
   FilePdfOutlined,
@@ -307,6 +321,7 @@ const settings = reactive({
   checkOnStartup: true,
 });
 let settingsReady = false;
+const addMenuOpen = ref(false);
 
 const state = reactive({
   fileList: [],
@@ -392,6 +407,9 @@ onMounted(() => {
 });
 
 onActivated(applyPrintEdit);
+onDeactivated(() => {
+  addMenuOpen.value = false;
+});
 
 watch(() => JSON.stringify(settingsPayload()), persistSettings);
 
@@ -535,15 +553,21 @@ async function fetchFromUrl() {
   }
 }
 
-async function opendir() {
+function onAddMenu({ key }) {
+  addMenuOpen.value = false;
+  opendir(key);
+}
+
+async function opendir(kind = "file") {
   if (!window.ipcRenderer) {
     message.error("无法打开文件选择");
     return;
   }
-  const res = await window.ipcRenderer.invoke("openDialogSync");
+  const directory = kind === "directory";
+  const res = await window.ipcRenderer.invoke("openDialogSync", directory ? "directory" : "file");
   if (!res) return;
   if (!res.length) {
-    message.warning("这个文件夹里没有 JPG、JPEG、PNG、WebP 图片");
+    message.warning(directory ? "这个文件夹里没有 JPG、JPEG、PNG、WebP 图片" : "只支持 JPG、JPEG、PNG、WebP 图片");
     return;
   }
   appendFiles(res);
@@ -853,6 +877,24 @@ button.version-badge {
   align-items: center;
   flex: none;
   gap: 8px;
+}
+
+.add-split {
+  display: inline-flex;
+  align-items: center;
+}
+
+.add-split :deep(.ant-btn:first-child) {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.add-caret {
+  width: 32px;
+  margin-left: -1px;
+  padding-inline: 0;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
 }
 
 .split {

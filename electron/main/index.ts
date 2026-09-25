@@ -246,18 +246,28 @@ function collectImages(inputs: string[]) {
   return files;
 }
 
-ipcMain.handle("openDialogSync", () => {
-  const result = dialog.showOpenDialogSync(win, {
-    title: "选择图片或文件夹",
+ipcMain.handle("openDialogSync", async (_event, kind?: string) => {
+  const directory = kind === "directory";
+  // Windows 和 Linux 不能在同一个系统框里同时选文件和文件夹，同时打开时只会剩文件夹。
+  const properties: Array<"openFile" | "openDirectory" | "multiSelections"> = directory
+    ? ["openDirectory", "multiSelections"]
+    : process.platform === "darwin"
+      ? ["openFile", "openDirectory", "multiSelections"]
+      : ["openFile", "multiSelections"];
+  const options: Electron.OpenDialogOptions = {
+    title: directory ? "选择文件夹" : "选择图片",
     buttonLabel: "添加",
-    filters: [
+    properties,
+  };
+  if (!directory) {
+    options.filters = [
       { name: "图片", extensions: ["jpg", "jpeg", "jpe", "jfif", "png", "webp"] },
       { name: "所有文件", extensions: ["*"] },
-    ],
-    properties: ["openFile", "openDirectory", "multiSelections"],
-  });
-  if (!result?.length) return null;
-  return collectImages(result);
+    ];
+  }
+  const result = await dialog.showOpenDialog(win ?? undefined, options);
+  if (result.canceled || !result.filePaths.length) return null;
+  return collectImages(result.filePaths);
 });
 
 ipcMain.handle("collect_images", (_event, inputs: string[]) => collectImages(inputs || []));
