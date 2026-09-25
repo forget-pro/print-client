@@ -1,0 +1,77 @@
+name: Electron App Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: npm i -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts=false
+
+      - name: Bump version
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          pnpm version patch --no-git-tag-version
+
+      - name: Build Electron app for Windows
+        shell: bash
+        run: pnpm run build:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read release metadata
+        id: meta
+        shell: bash
+        run: |
+          version=$(node --input-type=module -e "import {readFileSync} from 'node:fs'; process.stdout.write(JSON.parse(readFileSync('package.json','utf8')).version)")
+          product=$(node --input-type=module -e "import {readFileSync} from 'node:fs'; const text = readFileSync('electron-builder.json5','utf8').replace(/\\/\\/.*/g,''); const match = text.match(/productName:\\s*\"([^\"]+)\"/); if (!match) process.exit(1); process.stdout.write(match[1])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "product=$product" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push version
+        shell: bash
+        run: |
+          git add package.json
+          git commit -m "chore: update version to ${{ steps.meta.outputs.version }}"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        id: push
+
+      - name: Create Release with Tag
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: app-v${{ steps.meta.outputs.version }}
+          name: App v${{ steps.meta.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          target_commitish: ${{ steps.push.outputs.sha }}
+          body: |
+            ## 图片打印 v${{ steps.meta.outputs.version }}
+            安装包发布后，已安装的客户端会自动检测到这个版本。
+          files: |
+            release/${{ steps.meta.outputs.version }}/${{ steps.meta.outputs.product }}-Windows-${{ steps.meta.outputs.version }}-Setup.exe
+            release/${{ steps.meta.outputs.version }}/${{ steps.meta.outputs.product }}-Windows-${{ steps.meta.outputs.version }}-Setup.exe.blockmap
+            release/${{ steps.meta.outputs.version }}/latest.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
