@@ -20,8 +20,10 @@ type Hooks = {
 type Phone = { name: string; seen: number; reason: "leave" | "idle"; socket: WebSocket };
 
 const IDLE_MS = 30 * 60 * 1000;
+const LOCAL_PORT = 17321;
 
 let server: http.Server | null = null;
+let probe: http.Server | null = null;
 let bonjour: Bonjour | null = null;
 let hooks: Hooks | null = null;
 let token = "";
@@ -46,6 +48,7 @@ export function startPhoneTransfer(options: Hooks) {
     const address = active.address();
     currentPort = typeof address === "object" && address ? address.port : 0;
     advertise(currentPort, token);
+    startLocalProbe();
     return sessionInfo();
   }).finally(() => {
     starting = null;
@@ -70,6 +73,7 @@ export function stopPhoneTransfer() {
     server = null;
   }
   stopAdvertiser();
+  stopLocalProbe();
 }
 
 function sessionInfo() {
@@ -89,6 +93,34 @@ function stopAdvertiser() {
     instance.destroy();
   } catch {
     // 退出时组播套接字可能已经关掉
+  }
+}
+
+function startLocalProbe() {
+  stopLocalProbe();
+  const active = http.createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method !== "GET" || url.pathname !== "/session" || !token || !currentPort) {
+      sendJson(res, 404, { ok: false });
+      return;
+    }
+    sendJson(res, 200, { ok: true, port: currentPort, token });
+  });
+  probe = active;
+  active.on("error", () => {
+    if (probe === active) probe = null;
+  });
+  active.listen(LOCAL_PORT, "127.0.0.1");
+}
+
+function stopLocalProbe() {
+  const active = probe;
+  probe = null;
+  if (!active) return;
+  try {
+    active.close();
+  } catch {
+    // 退出时端口可能已经关掉
   }
 }
 
