@@ -39,6 +39,7 @@
     "vue-tsc": "^3.3.11"
   },
   "dependencies": {
+    "@ant-design/icons-vue": "7.0.1",
     "ant-design-vue": "^4.2.6",
     "electron-updater": "^6.8.9",
     "image-size": "^2.0.4",
