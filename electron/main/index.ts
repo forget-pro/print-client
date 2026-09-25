@@ -5,7 +5,7 @@ import PDFDocument from "pdfkit";
 import sharp from "sharp";
 import { imageSize } from "image-size";
 import { imageSizeFromFile } from "image-size/fromFile";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import fs from "node:fs";
 import { fetchPageImages } from "./fetch-images";
 import { layoutImagePages } from "./pdf-layout";
@@ -13,7 +13,9 @@ import { renderEdit } from "./image-edit";
 import { paperPoints } from "../../src/paper";
 import { IMAGE_EXT } from "../../src/files";
 import { readSettings, updateFeed, writeSettings } from "./settings";
+import { startPhoneTransfer, stopPhoneTransfer } from "./phone-transfer";
 import { stat } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
@@ -415,59 +417,203 @@ type PrintJob = {
   duplexMode?: "longEdge" | "shortEdge";
   collate?: boolean;
   dpi?: number;
+  paper?: string;
   paperWidth?: number;
   paperHeight?: number;
 };
 
+function jobCopies(job: PrintJob) {
+  return Math.min(99, Math.max(1, Math.round(Number(job.copies)) || 1));
+}
+
+function cupsEnv() {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key === "LANG" || key.startsWith("LC_") || value === undefined) continue;
+    env[key] = value;
+  }
+  env.LANG = "C";
+  env.LC_ALL = "C";
+  return env;
+}
+
+function runCommand(bin: string, args: string[], timeout: number, env?: NodeJS.ProcessEnv) {
+  return new Promise<void>((resolve, reject) => {
+    execFile(bin, args, { timeout, encoding: "utf8", windowsHide: true, env }, (error, _stdout, stderr) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+      const detail = String(stderr || error.message || "").trim();
+      const wrapped = new Error(detail || "打印未完成");
+      (wrapped as NodeJS.ErrnoException).code = (error as NodeJS.ErrnoException).code;
+      reject(wrapped);
+    });
+  });
+}
+
+function cupsMedia(job: PrintJob) {
+  const names: Record<string, string> = {
+    a4: "A4",
+    a3: "A3",
+    a5: "A5",
+    b5: "B5",
+    letter: "Letter",
+    legal: "Legal",
+  };
+  return names[String(job.paper || "").trim().toLowerCase()] || "A4";
+}
+
+function cupsDuplex(job: PrintJob) {
+  if (job.duplex === true) return job.duplexMode === "shortEdge" ? "DuplexTumble" : "DuplexNoTumble";
+  if (job.duplex === false) return "None";
+  return "";
+}
+
+function lpArgs(filepath: string, job: PrintJob, detailed: boolean) {
+  const args = ["-t", "图片打印", "-n", String(jobCopies(job))];
+  if (job.deviceName) args.push("-d", job.deviceName);
+  if (detailed) {
+    args.push("-o", `media=${cupsMedia(job)}`);
+    const duplex = cupsDuplex(job);
+    if (duplex) args.push("-o", `Duplex=${duplex}`);
+    if (job.grayscale) args.push("-o", "ColorModel=Gray");
+    args.push("-o", "fit-to-page");
+  }
+  args.push(filepath);
+  return args;
+}
+
+async function printWithLp(filepath: string, job: PrintJob) {
+  const bin = process.platform === "darwin" ? "/usr/bin/lp" : "lp";
+  await runCommand(bin, lpArgs(filepath, job, true), 60000, cupsEnv());
+  return { cancelled: false };
+}
+
+const WINDOWS_PRINT_SCRIPT = `
+param(
+  [Parameter(Mandatory = $true)][string]$Path,
+  [string]$Printer = "",
+  [int]$Copies = 1,
+  [string]$Duplex = "",
+  [switch]$Collate,
+  [switch]$Grayscale,
+  [double]$PaperWidth = 0,
+  [double]$PaperHeight = 0,
+  [int]$Dpi = 200
+)
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType = WindowsRuntime]
+$null = [Windows.Data.Pdf.PdfPageRenderOptions, Windows.Data.Pdf, ContentType = WindowsRuntime]
+$null = [Windows.Storage.Streams.InMemoryRandomAccessStream, Windows.Storage.Streams, ContentType = WindowsRuntime]
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+  $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq "IAsyncOperation\`1"
+})[0]
+function Await($Operation, $Type) {
+  $task = $asTaskGeneric.MakeGenericMethod($Type).Invoke($null, @($Operation))
+  $task.Wait()
+  return $task.Result
+}
+function AwaitAction($Action) {
+  $method = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and -not $_.IsGenericMethod
+  })[0]
+  $task = $method.Invoke($null, @($Action))
+  $task.Wait()
+}
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+$pdf = Await ([Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file)) ([Windows.Data.Pdf.PdfDocument])
+if ($pdf.PageCount -lt 1) { throw "PDF 没有页面" }
+$dpi = [Math]::Max(72, [Math]::Min(300, $Dpi))
+$stamp = [guid]::NewGuid().ToString("n")
+$script:images = @()
+for ($i = 0; $i -lt $pdf.PageCount; $i++) {
+  $page = $pdf.GetPage($i)
+  $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+  $render = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+  $pixels = [uint32]([Math]::Min(4500, [Math]::Round($page.Size.Width * $dpi / 96)))
+  if ($pixels -gt 0) { $render.DestinationWidth = $pixels }
+  AwaitAction ($page.RenderToStreamAsync($stream, $render))
+  $memory = New-Object System.IO.MemoryStream
+  [System.IO.WindowsRuntimeStreamExtensions]::AsStream($stream).CopyTo($memory)
+  $memory.Position = 0
+  $bitmap = [System.Drawing.Image]::FromStream($memory)
+  $pageFile = Join-Path $env:TEMP ("pic-print-{0}-{1}.png" -f $stamp, $i)
+  $bitmap.Save($pageFile, [System.Drawing.Imaging.ImageFormat]::Png)
+  $bitmap.Dispose()
+  $memory.Dispose()
+  $script:images += $pageFile
+}
+$script:pageIndex = 0
+$doc = New-Object System.Drawing.Printing.PrintDocument
+$doc.DocumentName = "图片打印"
+$doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController
+if ($Printer) { $doc.PrinterSettings.PrinterName = $Printer }
+if (-not $doc.PrinterSettings.IsValid) { throw "找不到这台打印机" }
+$doc.PrinterSettings.Copies = [int16]([Math]::Max(1, [Math]::Min(99, $Copies)))
+if ($Collate) { $doc.PrinterSettings.Collate = $true }
+if ($Duplex -eq "long" -and $doc.PrinterSettings.CanDuplex) {
+  $doc.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Vertical
+} elseif ($Duplex -eq "short" -and $doc.PrinterSettings.CanDuplex) {
+  $doc.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Horizontal
+} elseif ($Duplex -eq "simplex" -and $doc.PrinterSettings.CanDuplex) {
+  $doc.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Simplex
+}
+$doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
+$doc.DefaultPageSettings.Color = -not $Grayscale
+if ($PaperWidth -gt 0 -and $PaperHeight -gt 0) {
+  $width = [int][Math]::Round($PaperWidth * 100 / 72)
+  $height = [int][Math]::Round($PaperHeight * 100 / 72)
+  $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize("pic-print", $width, $height)
+  $doc.DefaultPageSettings.Landscape = $false
+}
+$doc.add_PrintPage({
+  param($sender, $e)
+  $image = [System.Drawing.Image]::FromFile($script:images[$script:pageIndex])
+  $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $e.Graphics.TranslateTransform(-$e.PageSettings.HardMarginX, -$e.PageSettings.HardMarginY)
+  $e.Graphics.DrawImage($image, 0, 0, $e.PageBounds.Width, $e.PageBounds.Height)
+  $image.Dispose()
+  $script:pageIndex += 1
+  $e.HasMorePages = $script:pageIndex -lt $script:images.Count
+})
+try { $doc.Print() } finally {
+  $doc.Dispose()
+  foreach ($pageFile in $script:images) { Remove-Item $pageFile -Force -ErrorAction SilentlyContinue }
+}
+`;
+
+async function printWithWindows(filepath: string, job: PrintJob) {
+  const scriptPath = path.join(os.tmpdir(), "pic-print-spool.ps1");
+  await fs.promises.writeFile(scriptPath, WINDOWS_PRINT_SCRIPT.trim(), "utf8");
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-File", scriptPath,
+    "-Path", filepath,
+    "-Copies", String(jobCopies(job)),
+    "-Dpi", String(job.dpi === 300 ? 300 : 200),
+  ];
+  if (job.deviceName) args.push("-Printer", job.deviceName);
+  if (job.duplex === true) args.push("-Duplex", job.duplexMode === "shortEdge" ? "short" : "long");
+  else if (job.duplex === false) args.push("-Duplex", "simplex");
+  if (job.collate) args.push("-Collate");
+  if (job.grayscale) args.push("-Grayscale");
+  if (job.paperWidth && job.paperHeight) {
+    args.push("-PaperWidth", String(job.paperWidth), "-PaperHeight", String(job.paperHeight));
+  }
+  await runCommand("powershell.exe", args, 120000);
+  return { cancelled: false };
+}
+
 function printPdfFile(filepath: string, copies: number | PrintJob = 1, deviceName = "") {
   const job: PrintJob = typeof copies === "number" ? { copies, deviceName } : copies;
-  return new Promise((resolve, reject) => {
-    const printWin = new BrowserWindow({
-      show: false,
-      webPreferences: { plugins: true },
-    });
-    let settled = false;
-    const finish = (error?: Error, cancelled = false) => {
-      if (settled) return;
-      settled = true;
-      if (!printWin.isDestroyed()) printWin.close();
-      if (error) reject(error);
-      else resolve({ cancelled });
-    };
-    const loadTimer = setTimeout(() => finish(new Error("打印文件打开超时")), 20000);
-    printWin.webContents.once("did-fail-load", () => {
-      clearTimeout(loadTimer);
-      finish(new Error("打印文件打开失败"));
-    });
-    printWin.webContents.once("did-finish-load", () => {
-      clearTimeout(loadTimer);
-      const options: Electron.WebContentsPrintOptions = {
-        silent: true,
-        printBackground: true,
-        copies: Math.min(99, Math.max(1, Math.round(Number(job.copies)) || 1)),
-      };
-      if (job.deviceName) options.deviceName = job.deviceName;
-      if (job.grayscale) options.color = false;
-      if (job.duplex === true) options.duplexMode = job.duplexMode === "shortEdge" ? "shortEdge" : "longEdge";
-      if (job.duplex === false) options.duplexMode = "simplex";
-      if (typeof job.collate === "boolean") options.collate = job.collate;
-      if (job.dpi) options.dpi = { horizontal: job.dpi, vertical: job.dpi };
-      if (job.paperWidth && job.paperHeight) {
-        const micron = 25400 / 72;
-        options.margins = { marginType: "none" };
-        options.pageSize = {
-          width: Math.round(job.paperWidth * micron),
-          height: Math.round(job.paperHeight * micron),
-        };
-      }
-      printWin.webContents.print(options, (success, reason) => {
-        const cancelled = !success && /cancel/i.test(String(reason || ""));
-        if (success || cancelled || !reason) finish(undefined, cancelled);
-        else finish(new Error("打印未完成"));
-      });
-    });
-    printWin.loadFile(filepath);
-  });
+  if (process.platform === "win32") return printWithWindows(filepath, job);
+  return printWithLp(filepath, job);
 }
 
 let pdfCache: { key: string; path: string } | null = null;
@@ -614,7 +760,11 @@ ipcMain.handle("print_sheet", async (_event, data: string) => {
       y: options.y,
     },
   });
-  return printPdfFile(pdf, Number(options.copies) || 1, options.deviceName || "");
+  return printPdfFile(pdf, {
+    copies: Number(options.copies) || 1,
+    deviceName: options.deviceName || "",
+    paper: options.size === "A3" ? "A3" : "A4",
+  });
 });
 
 function assertPreviewPdf(filePath: string) {
@@ -788,6 +938,7 @@ ipcMain.handle("print_pdf", async (_event, data) => {
         duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
         collate: Boolean(payload.collate),
         dpi: payload.quality === "high" ? 300 : 150,
+        paper: typeof payload.paper === "string" ? payload.paper : "",
         paperWidth: Number(payload.paperWidth) || undefined,
         paperHeight: Number(payload.paperHeight) || undefined,
       });
@@ -811,6 +962,69 @@ ipcMain.handle("fetch_page_images", async (event, pageUrl: string) => {
   }
 });
 
+const phoneDecisions = new Map<string, (keep: boolean) => void>();
+
+ipcMain.handle("phone_transfer_start", (event) => {
+  const dirpath = path.join(app.getPath("documents"), "pic_print");
+  const send = (payload: Record<string, unknown>) => {
+    if (!event.sender.isDestroyed()) event.sender.send("phone_transfer", payload);
+  };
+  return startPhoneTransfer({
+    dir: dirpath,
+    keep: (hash) => new Promise((resolve) => {
+      const id = randomBytes(4).toString("hex");
+      const timer = setTimeout(() => {
+        phoneDecisions.delete(id);
+        resolve(true);
+      }, 4000);
+      phoneDecisions.set(id, (keep) => {
+        clearTimeout(timer);
+        phoneDecisions.delete(id);
+        resolve(keep);
+      });
+      send({ type: "offer", id, hash });
+    }),
+    cancel: (hash) => send({ type: "offer-cancel", hash }),
+    onJoin: (devices) => send({ type: "join", devices }),
+    onClients: (devices) => send({ type: "clients", devices }),
+    onImage: (file) => send({ type: "image", path: file.path, name: file.name, hash: file.hash }),
+    onDisconnect: (session) => send({ type: "disconnect", reason: session.reason }),
+  });
+});
+
+ipcMain.handle("phone_transfer_decide", (_event, payload: unknown) => {
+  const body = payload && typeof payload === "object" ? payload as { id?: unknown; keep?: unknown } : {};
+  const id = typeof body.id === "string" ? body.id : "";
+  phoneDecisions.get(id)?.(body.keep === true);
+});
+
+ipcMain.handle("phone_transfer_discard", async (_event, filePath: unknown) => {
+  if (typeof filePath !== "string") return;
+  const dirpath = path.resolve(app.getPath("documents"), "pic_print");
+  const resolved = path.resolve(filePath);
+  if (path.dirname(resolved) !== dirpath) return;
+  await fs.promises.unlink(resolved).catch(() => {});
+});
+
+ipcMain.handle("phone_transfer_stop", () => {
+  stopPhoneTransfer();
+});
+
+ipcMain.handle("image_hashes", (_event, paths: unknown) => {
+  const list = Array.isArray(paths) ? paths.filter((item): item is string => typeof item === "string") : [];
+  return Promise.all(list.map((filePath) => hashFile(filePath)));
+});
+
+function hashFile(filePath: string) {
+  return new Promise<string>((resolve) => {
+    const hash = createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", () => resolve(""));
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 ipcMain.handle("sort_files", async (_event, data: string) => {
   const info = JSON.parse(data);
   const files: string[] = Array.isArray(info.files) ? info.files : [];
@@ -832,6 +1046,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
+  stopPhoneTransfer();
   const dirpath = path.join(app.getPath("documents"), "pic_print");
   let entries: string[] = [];
   try {

@@ -19,10 +19,6 @@
           <div class="row copies-row">
             <span>打印份数</span>
             <a-input-number v-model:value="copies" class="copies" :min="1" :max="99" :precision="0" />
-            <label class="check" :class="{ quiet: copies < 2 }">
-              <input v-model="collate" type="checkbox" :disabled="copies < 2" />
-              逐份打印
-            </label>
           </div>
           <div class="row quality-row">
             <span>打印质量</span>
@@ -40,7 +36,6 @@
           <div class="ranges">
             <label><input v-model="rangeMode" type="radio" value="current" />当前页面</label>
             <label><input v-model="rangeMode" type="radio" value="all" />所有页面</label>
-            <label><input v-model="rangeMode" type="radio" value="view" />当前视图</label>
             <div class="spec-line">
               <label><input v-model="rangeMode" type="radio" value="custom" />页码</label>
               <input
@@ -69,24 +64,10 @@
           <div class="segment">
             <button type="button" :class="{ on: mode === 'page' }" @click="chooseMode('page')">页面大小</button>
             <button type="button" :class="{ on: mode === 'nup' }" @click="chooseMode('nup')">一张多页</button>
-            <button type="button" :class="{ on: mode === 'booklet' }" @click="chooseMode('booklet')">小册子</button>
           </div>
           <div v-if="mode === 'page'" class="fits">
             <label><input v-model="fit" type="radio" value="margin" />适合打印边距</label>
-            <label><input v-model="fit" type="radio" value="actual" />实际大小</label>
             <label><input v-model="fit" type="radio" value="shrink" />缩小过大页面</label>
-            <div class="scale">
-              <label><input v-model="fit" type="radio" value="custom" />自定义比例</label>
-              <a-input-number
-                v-model:value="scale"
-                class="scale-input"
-                :min="10"
-                :max="400"
-                :precision="0"
-                :disabled="fit !== 'custom'"
-              />
-              <span>%</span>
-            </div>
           </div>
           <div v-else-if="mode === 'nup'" class="nup">
             <button
@@ -102,7 +83,6 @@
               {{ count }} 页
             </button>
           </div>
-          <p v-else class="hint">按折页顺序，两页拼在一张横向纸上。</p>
           <div class="duplex-row">
             <label class="check">
               <input v-model="duplex" type="checkbox" />
@@ -134,12 +114,6 @@
               <label>右<input v-model.number="marginMm.right" type="number" min="0" max="50" step="0.1" @input="marginId = 'custom'" /></label>
             </div>
             <p>单位：毫米</p>
-          </div>
-          <div class="orients">
-            <span>纸张方向</span>
-            <label><input v-model="orientation" type="radio" value="auto" :disabled="mode === 'booklet'" />自动横向/纵向</label>
-            <label><input v-model="orientation" type="radio" value="portrait" :disabled="mode === 'booklet'" />纵向</label>
-            <label><input v-model="orientation" type="radio" value="landscape" :disabled="mode === 'booklet'" />横向</label>
           </div>
         </div>
 
@@ -202,7 +176,6 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const nupChoices = [2, 4, 6, 9, 16];
 const marginPresets = [
-  { id: "none", label: "无" },
   { id: "normal", label: "普通", mm: 19.1 },
   { id: "narrow", label: "窄", mm: 12.7 },
   { id: "wide", label: "宽", mm: 25.4 },
@@ -218,7 +191,6 @@ const props = defineProps({
 const printers = ref([]);
 const printer = ref("");
 const copies = ref(1);
-const collate = ref(true);
 const quality = ref("standard");
 const grayscale = ref(false);
 const rangeMode = ref("all");
@@ -227,16 +199,14 @@ const parity = ref("all");
 const reverse = ref(false);
 const mode = ref("page");
 const fit = ref("shrink");
-const scale = ref(100);
 const perSheet = ref(4);
 const duplex = ref(false);
 const duplexEdge = ref("longEdge");
 const paper = ref("A4");
-const orientation = ref("portrait");
-const marginId = ref("none");
+const marginId = ref("normal");
 const marginOpen = ref(false);
-const marginMm = ref({ top: 0, right: 0, bottom: 0, left: 0 });
-const papers = PAPERS;
+const marginMm = ref({ top: 19.1, right: 19.1, bottom: 19.1, left: 19.1 });
+const papers = Object.fromEntries(Object.entries(PAPERS).filter(([name]) => name !== "B5"));
 
 const loading = ref(false);
 const error = ref("");
@@ -247,7 +217,6 @@ const thumbs = ref({});
 const stageRef = ref(null);
 const stageSize = ref({ width: 480, height: 560 });
 const pageSizes = ref({});
-const docLandscape = ref(false);
 
 let pdfDoc = null;
 let loadedPath = "";
@@ -267,11 +236,11 @@ const layout = computed(() => layoutSheets({
   pages: pages.value,
   pageSize: (page) => pageSizes.value[page] || { w: 595.28, h: 841.89 },
   paper: paper.value,
-  orientation: orientation.value,
-  docLandscape: docLandscape.value,
+  orientation: "portrait",
+  docLandscape: false,
   mode: mode.value,
-  fit: fit.value,
-  scale: scale.value,
+  fit: fit.value === "shrink" ? "shrink" : "margin",
+  scale: 100,
   perSheet: perSheet.value,
   margin: marginValue(),
 }));
@@ -350,7 +319,6 @@ function applyPreset(id) {
 
 function chooseMode(next) {
   mode.value = next;
-  if (next === "booklet") duplex.value = true;
   previewIndex.value = 1;
 }
 
@@ -425,9 +393,8 @@ async function ensurePdf() {
     }
     pageSizes.value = sizes;
     const first = sizes[1] || { w: 595.28, h: 841.89 };
-    docLandscape.value = first.w > first.h;
-    paper.value = detectPaper(first.w, first.h);
-    orientation.value = docLandscape.value ? "landscape" : "portrait";
+    const detected = detectPaper(first.w, first.h);
+    paper.value = detected === "B5" ? "A4" : detected;
     pageSpec.value = `1-${doc.numPages}`;
     previewIndex.value = 1;
     await paintThumbs();
@@ -510,12 +477,13 @@ async function submit() {
     }
     const result = await window.ipcRenderer.invoke("print_pdf", JSON.stringify({
       copies: copies.value,
-      collate: copies.value > 1 && collate.value,
+      collate: false,
       quality: quality.value,
       deviceName: printer.value,
       grayscale: grayscale.value,
       duplex: duplex.value,
       duplexEdge: duplex.value ? duplexEdge.value : "",
+      paper: paper.value,
       paperWidth: plan.paperW,
       paperHeight: plan.paperH,
       clip: plan.clip,
@@ -637,7 +605,6 @@ h3:first-child {
 }
 
 .row,
-.orients,
 .ranges,
 .fits,
 .parity-row {
@@ -659,7 +626,7 @@ h3:first-child {
 }
 
 .copies-row {
-  grid-template-columns: 64px 108px minmax(0, 1fr);
+  grid-template-columns: 64px 108px;
 }
 
 .copies.ant-input-number {
@@ -782,12 +749,11 @@ select {
 }
 
 .fits {
-  grid-template-columns: 1fr 1fr 1.15fr;
+  grid-template-columns: 1fr 1fr;
 }
 
 .ranges label,
-.fits label,
-.orients label {
+.fits label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -805,8 +771,7 @@ select {
   background: #f7f8fa;
 }
 
-.warn,
-.hint {
+.warn {
   margin: -4px 0 8px;
   color: #98a2b3;
   font-size: 12px;
@@ -827,7 +792,7 @@ select {
 }
 
 .segment {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
 }
 
 .nup {
@@ -878,37 +843,6 @@ select {
   background: #2f6fed;
 }
 
-.scale {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  grid-column: 1 / -1;
-}
-
-.scale-input.ant-input-number {
-  width: 96px;
-  height: 32px;
-  border-color: #d7dbe3;
-  border-radius: 4px;
-  background: #fff;
-}
-
-.scale-input :deep(.ant-input-number-input) {
-  height: 30px;
-  padding-inline: 8px 22px;
-  text-align: center;
-  font-size: 13px;
-}
-
-.scale-input :deep(.ant-input-number-handler-wrap) {
-  opacity: 1;
-}
-
-.scale-input.ant-input-number-focused {
-  border-color: #2f6fed;
-  box-shadow: 0 0 0 2px rgba(47, 111, 237, 0.12);
-}
-
 .duplex-row {
   display: flex;
   align-items: center;
@@ -930,13 +864,6 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.orients {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
 }
 
 .margin-panel {

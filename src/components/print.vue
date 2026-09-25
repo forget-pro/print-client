@@ -35,6 +35,10 @@
             <template #icon><edit-outlined /></template>
             图片编辑
           </a-button>
+          <a-button @click="openPhone">
+            <template #icon><mobile-outlined /></template>
+            手机传图
+          </a-button>
           <span class="split" aria-hidden="true" />
           <a-dropdown :disabled="state.fileList.length < 2">
             <a-button :disabled="state.fileList.length < 2">
@@ -117,6 +121,13 @@
     </section>
 
     <p class="hint">拖拽卡片可以调整打印顺序</p>
+    <div v-if="state.phoneConnected" class="phone-live">
+      <span class="phone-dot" aria-hidden="true" />
+      <strong>{{ state.phoneNames.length > 1 ? state.phoneNames.length + ' 台手机已连接' : (state.phoneNames[0] || '手机') + ' 已连接' }}</strong>
+      <span v-if="state.phoneNames.length > 1">{{ state.phoneNames.join('、') }}</span>
+      <span v-else>关掉二维码窗口也可以继续传图</span>
+      <span v-if="state.phoneCount" class="phone-live-count">已收到 {{ state.phoneCount }} 张</span>
+    </div>
 
     <main class="stage">
       <div v-if="!state.fileList.length" class="empty" @click="opendir('file')">
@@ -160,7 +171,6 @@
                 <delete-outlined />
               </button>
             </div>
-            <p class="name" :title="item.name">{{ item.name }}</p>
           </article>
       </VueDraggable>
     </main>
@@ -201,6 +211,14 @@
           :status="state.fetchError ? 'exception' : 'active'"
           stroke-color="#1d4ed8"
         />
+      </div>
+    </a-modal>
+
+    <a-modal v-model:open="state.phoneOpen" title="手机传图" :footer="null" :width="420">
+      <div class="phone-box">
+        <img v-if="state.phoneQr" class="phone-qr" :src="state.phoneQr" alt="传图二维码" />
+        <p v-if="state.phoneHint" class="phone-hint">{{ state.phoneHint }}</p>
+        <p v-if="state.phoneError" class="fetch-error">{{ state.phoneError }}</p>
       </div>
     </a-modal>
 
@@ -279,6 +297,7 @@ import {
   FolderOpenOutlined,
   InboxOutlined,
   LinkOutlined,
+  MobileOutlined,
   RotateRightOutlined,
   SettingOutlined,
   SortAscendingOutlined,
@@ -286,6 +305,7 @@ import {
 import { Modal, message } from "ant-design-vue";
 import { throttle } from "lodash-es";
 import { beginEdit, takeEditResult } from "../edit-session";
+import QRCode from "qrcode";
 import { IMAGE_EXT, fileName, fileSrc } from "../files";
 defineOptions({ name: "Print" });
 
@@ -340,6 +360,14 @@ const state = reactive({
   fetchPercent: 0,
   fetchText: "",
   fetchError: "",
+  phoneOpen: false,
+  phoneConnected: false,
+  phoneNames: [],
+  phoneUrl: "",
+  phoneQr: "",
+  phoneHint: "",
+  phoneCount: 0,
+  phoneError: "",
   detectedCount: 0,
   fetchedCount: 0,
   pageUrl: "",
@@ -404,27 +432,115 @@ onMounted(() => {
   window.ipcRenderer?.invoke("app_version").then((version) => {
     if (version) state.version = version;
   }).catch(() => {});
+  const phonePending = new Set();
+  window.ipcRenderer?.on("phone_transfer", async (_event, payload) => {
+    if (payload?.type === "offer" && payload.hash) {
+      const exists = phonePending.has(payload.hash) || state.fileList.some((item) => item.hash === payload.hash);
+      if (exists) noteSkipped(1);
+      else phonePending.add(payload.hash);
+      window.ipcRenderer.invoke("phone_transfer_decide", { id: payload.id, keep: !exists });
+      return;
+    }
+    if (payload?.type === "offer-cancel" && payload.hash) {
+      phonePending.delete(payload.hash);
+      return;
+    }
+    if (payload?.type === "join" || payload?.type === "clients") {
+      const names = Array.isArray(payload.devices) ? payload.devices.filter(Boolean) : [];
+      const previous = state.phoneNames.slice();
+      state.phoneNames = names;
+      state.phoneConnected = names.length > 0;
+      if (names.length > previous.length) message.success(`${names[names.length - 1]} 已连接`);
+      if (payload.type === "clients" && names.length < previous.length) message.info("一台手机已断开");
+      state.phoneHint = `${names.join("、") || "手机"} 已连上。关掉窗口也可以继续传图，图片会直接出现在列表里。`;
+      return;
+    }
+    if (payload?.type === "disconnect") {
+      const wasConnected = state.phoneConnected;
+      state.phoneConnected = false;
+      state.phoneNames = [];
+      state.phoneHint = "用小程序扫这个码。手机和电脑要连同一个 Wi-Fi。";
+      if (wasConnected) {
+        message.info(payload.reason === "idle" ? "超过 30 分钟没有传图，手机连接已结束" : "手机已断开");
+      }
+      return;
+    }
+    if (payload?.type === "image" && payload.path) {
+      const added = await appendFiles([payload.path]);
+      if (payload.hash) phonePending.delete(payload.hash);
+      if (!added) {
+        if (!state.fileList.some((item) => item.path === payload.path)) {
+          window.ipcRenderer.invoke("phone_transfer_discard", payload.path);
+        }
+        return;
+      }
+      state.phoneConnected = true;
+      state.phoneCount += added;
+      state.phoneHint = `已收到 ${state.phoneCount} 张，图片已经出现在列表里`;
+    }
+  });
+  ensurePhone();
 });
 
 onActivated(applyPrintEdit);
 onDeactivated(() => {
   addMenuOpen.value = false;
+  state.phoneOpen = false;
 });
 
 watch(() => JSON.stringify(settingsPayload()), persistSettings);
 
 function toItem(filePath) {
   uid += 1;
-  return { id: `${Date.now()}-${uid}`, path: filePath, name: fileName(filePath), rotation: 0 };
+  return { id: `${Date.now()}-${uid}`, path: filePath, name: fileName(filePath), rotation: 0, hash: "" };
+}
+
+let appendQueue = Promise.resolve();
+let skippedNotice = 0;
+let skippedTimer = 0;
+
+function noteSkipped(count) {
+  skippedNotice += count;
+  window.clearTimeout(skippedTimer);
+  skippedTimer = window.setTimeout(() => {
+    const count = skippedNotice;
+    skippedNotice = 0;
+    if (!count) return;
+    message.info(count === 1 ? "这张图片已经在列表里" : `已跳过 ${count} 张重复图片`);
+  }, 400);
 }
 
 function appendFiles(paths) {
+  const run = appendQueue.then(() => appendUnique(paths));
+  appendQueue = run.catch(() => 0);
+  return run;
+}
+
+async function appendUnique(paths) {
   const images = (paths || []).filter((item) => IMAGE_EXT.test(item));
   if (!images.length) {
     if (paths?.length) message.warning("只支持 JPG、JPEG、PNG、WebP 图片");
-    return;
+    return 0;
   }
-  state.fileList.push(...images.map(toItem));
+  const hashes = window.ipcRenderer
+    ? await window.ipcRenderer.invoke("image_hashes", images).catch(() => images.map(() => ""))
+    : images.map(() => "");
+  const seenHash = new Set(state.fileList.map((item) => item.hash).filter(Boolean));
+  const seenPath = new Set(state.fileList.map((item) => item.path));
+  const fresh = [];
+  images.forEach((filePath, index) => {
+    const hash = hashes[index] || "";
+    if (seenPath.has(filePath) || (hash && seenHash.has(hash))) return;
+    seenPath.add(filePath);
+    if (hash) seenHash.add(hash);
+    const item = toItem(filePath);
+    item.hash = hash;
+    fresh.push(item);
+  });
+  const skipped = images.length - fresh.length;
+  if (fresh.length) state.fileList.push(...fresh);
+  if (skipped) noteSkipped(skipped);
+  return fresh.length;
 }
 
 function imageStyle(item) {
@@ -476,6 +592,46 @@ function pdfPayload() {
 
 function paths() {
   return state.fileList.map((item) => item.path);
+}
+
+async function paintPhoneQr(url) {
+  if (!url) return;
+  state.phoneQr = await QRCode.toDataURL(url, {
+    margin: 1,
+    width: 280,
+    errorCorrectionLevel: "M",
+  });
+}
+
+async function ensurePhone() {
+  if (!window.ipcRenderer) return;
+  try {
+    const session = await window.ipcRenderer.invoke("phone_transfer_start");
+    if (session?.url) state.phoneUrl = session.url;
+  } catch {
+    state.phoneError = "没有可用的局域网地址";
+  }
+}
+
+async function openPhone() {
+  state.phoneError = "";
+  state.phoneHint = state.phoneNames.length
+    ? `${state.phoneNames.join("、")} 已连上。关掉窗口也可以继续传图，图片会直接出现在列表里。`
+    : "用小程序扫这个码。手机和电脑要连同一个 Wi-Fi。";
+  state.phoneOpen = true;
+  if (!window.ipcRenderer) {
+    state.phoneError = "请在软件里打开手机传图";
+    state.phoneHint = "";
+    return;
+  }
+  try {
+    if (!state.phoneUrl) await ensurePhone();
+    if (!state.phoneUrl) return;
+    await paintPhoneQr(state.phoneUrl);
+  } catch {
+    state.phoneError = "没有可用的局域网地址";
+    state.phoneHint = "";
+  }
 }
 
 function openFetch() {
@@ -573,11 +729,19 @@ async function opendir(kind = "file") {
   appendFiles(res);
 }
 
-function dedupe() {
+async function dedupe() {
+  const missing = state.fileList.filter((item) => !item.hash);
+  if (missing.length && window.ipcRenderer) {
+    const hashes = await window.ipcRenderer.invoke("image_hashes", missing.map((item) => item.path)).catch(() => []);
+    missing.forEach((item, index) => {
+      if (hashes[index]) item.hash = hashes[index];
+    });
+  }
   const seen = new Set();
   const next = state.fileList.filter((item) => {
-    if (seen.has(item.path)) return false;
-    seen.add(item.path);
+    const key = item.hash || item.path;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
   const removed = state.fileList.length - next.length;
@@ -845,6 +1009,28 @@ button.version-badge {
   font-size: 13px;
 }
 
+.phone-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 4px;
+  text-align: center;
+}
+
+.phone-qr {
+  width: 220px;
+  height: 220px;
+  border-radius: 12px;
+}
+
+.phone-hint {
+  margin: 0;
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .fetch-progress {
   display: flex;
   flex-direction: column;
@@ -1001,6 +1187,37 @@ button.version-badge {
   line-height: 1;
 }
 
+.phone-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin: 0 2px 12px;
+  padding: 8px 12px;
+  border: 1px solid #c7dbff;
+  border-radius: 10px;
+  background: #eff5ff;
+  color: #1d4ed8;
+  font-size: 13px;
+}
+
+.phone-live strong {
+  font-weight: 650;
+}
+
+.phone-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.16);
+}
+
+.phone-live-count {
+  margin-left: auto;
+  font-weight: 650;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
@@ -1076,21 +1293,6 @@ button.version-badge {
 
 .card-tools button:last-child:hover {
   color: #dc2626;
-}
-
-.name {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  margin: 0;
-  padding: 8px 10px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.94);
-  color: #334155;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .ghost {
