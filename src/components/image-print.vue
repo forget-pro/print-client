@@ -73,6 +73,12 @@
             自定义
           </button>
         </div>
+        <p class="label">收缩方式</p>
+        <div class="modes">
+          <button type="button" :class="{ on: sizing === 'cover' }" @click="chooseSizing('cover')">填充</button>
+          <button type="button" :class="{ on: sizing === 'stretch' }" @click="chooseSizing('stretch')">拉伸</button>
+          <button type="button" :class="{ on: sizing === 'contain' }" @click="chooseSizing('contain')">收缩到合适</button>
+        </div>
         <p class="label">对齐</p>
         <div class="aligns" :class="{ dim: fit }">
           <button
@@ -135,6 +141,7 @@ const copies = ref(1);
 const paper = ref("A4");
 const orientation = ref("portrait");
 const fit = ref(true);
+const sizing = ref("contain");
 const scale = ref(100);
 const alignX = ref("center");
 const alignY = ref("middle");
@@ -188,11 +195,20 @@ function clampAxis(value, size, page) {
   return Math.min(page - size, Math.max(0, value));
 }
 
+function baseSize(imageWidth, imageHeight, pageWidth, pageHeight) {
+  if (sizing.value === "stretch") return { width: pageWidth, height: pageHeight };
+  const ratio = sizing.value === "cover"
+    ? Math.max(pageWidth / imageWidth, pageHeight / imageHeight)
+    : Math.min(pageWidth / imageWidth, pageHeight / imageHeight);
+  const fitScale = ratio || 1;
+  return { width: imageWidth * fitScale, height: imageHeight * fitScale };
+}
+
 function place(imageWidth, imageHeight, pageWidth, pageHeight) {
-  const fitScale = Math.min(pageWidth / imageWidth, pageHeight / imageHeight) || 1;
+  const base = baseSize(imageWidth, imageHeight, pageWidth, pageHeight);
   const userScale = fit.value ? 1 : Math.min(2, Math.max(0.1, scale.value / 100));
-  const width = imageWidth * fitScale * userScale;
-  const height = imageHeight * fitScale * userScale;
+  const width = base.width * userScale;
+  const height = base.height * userScale;
   let x = (pageWidth - width) / 2;
   let y = (pageHeight - height) / 2;
   if (!fit.value && offset.value) {
@@ -204,7 +220,12 @@ function place(imageWidth, imageHeight, pageWidth, pageHeight) {
     if (alignY.value === "top") y = 0;
     if (alignY.value === "bottom") y = pageHeight - height;
   }
-  return { x, y, width, height, fitWidth: imageWidth * fitScale };
+  return { x, y, width, height, fitWidth: base.width, fitHeight: base.height };
+}
+
+function chooseSizing(mode) {
+  sizing.value = mode;
+  offset.value = null;
 }
 
 function zoomView(step) {
@@ -299,8 +320,7 @@ function setWidth(value) {
 
 function setHeight(value) {
   const cm = Number(value);
-  const box = place(source.value.w, source.value.h, pageBox.value[0], pageBox.value[1]);
-  const fitHeight = source.value.h * (box.fitWidth / source.value.w);
+  const fitHeight = placed.value.fitHeight;
   if (!cm || !fitHeight) return;
   fit.value = false;
   scale.value = Math.min(200, Math.max(20, (cm * PT_PER_CM / fitHeight) * 100));
@@ -359,6 +379,7 @@ async function submit() {
       size: paper.value,
       layout: orientation.value,
       fit: fit.value,
+      sizing: sizing.value,
       scale: scale.value,
       alignX: alignX.value,
       alignY: alignY.value,
@@ -509,6 +530,7 @@ onBeforeUnmount(() => {
 .paper {
   position: relative;
   flex: none;
+  overflow: hidden;
   background: #fff;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
 }
@@ -580,10 +602,12 @@ onBeforeUnmount(() => {
 .panel {
   display: flex;
   width: 332px;
+  min-height: 0;
   flex: none;
   flex-direction: column;
   gap: 12px;
   padding: 16px 16px 14px;
+  overflow: auto;
   background: #32343a;
 }
 
@@ -709,6 +733,7 @@ onBeforeUnmount(() => {
 
 .orient button,
 .layouts button,
+.modes button,
 .aligns button,
 .print {
   border: 0;
@@ -758,6 +783,24 @@ onBeforeUnmount(() => {
 .layouts button.on {
   border-color: #4c6fff;
   background: #2c3558;
+}
+
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr;
+  gap: 6px;
+}
+
+.modes button {
+  height: 32px;
+  border-radius: 6px;
+  background: #26282d;
+  font-size: 12px;
+}
+
+.modes button.on {
+  background: #4c6fff;
+  color: #fff;
 }
 
 .aligns {

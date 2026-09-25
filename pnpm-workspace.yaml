@@ -1,0 +1,7 @@
+allowBuilds:
+  core-js: true
+  electron: true
+  electron-winstaller: true
+  sharp: true
+minimumReleaseAgeExclude:
+  - vite@8.3.1

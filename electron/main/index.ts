@@ -3,7 +3,8 @@ import electronUpdater from "electron-updater";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
-import sizeOf from "image-size";
+import { imageSize } from "image-size";
+import { imageSizeFromFile } from "image-size/fromFile";
 import fs from "node:fs";
 import { fetchPageImages } from "./fetch-images";
 import { layoutImagePages } from "./pdf-layout";
@@ -258,12 +259,21 @@ function placeOnPage(
   imageHeight: number,
   pageWidth: number,
   pageHeight: number,
-  placement: { fit?: boolean; scale?: number; alignX?: string; alignY?: string; x?: number; y?: number },
+  placement: { fit?: boolean; sizing?: string; scale?: number; alignX?: string; alignY?: string; x?: number; y?: number },
 ) {
-  const fitScale = Math.min(pageWidth / imageWidth, pageHeight / imageHeight);
+  const sizing = placement.sizing === "cover" || placement.sizing === "stretch" ? placement.sizing : "contain";
+  const base = sizing === "stretch"
+    ? { width: pageWidth, height: pageHeight }
+    : (() => {
+      const ratio = sizing === "cover"
+        ? Math.max(pageWidth / imageWidth, pageHeight / imageHeight)
+        : Math.min(pageWidth / imageWidth, pageHeight / imageHeight);
+      const fitScale = ratio || 1;
+      return { width: imageWidth * fitScale, height: imageHeight * fitScale };
+    })();
   const userScale = placement.fit ? 1 : Math.min(2, Math.max(0.1, (Number(placement.scale) || 100) / 100));
-  const width = imageWidth * fitScale * userScale;
-  const height = imageHeight * fitScale * userScale;
+  const width = base.width * userScale;
+  const height = base.height * userScale;
   let x = (pageWidth - width) / 2;
   let y = (pageHeight - height) / 2;
   const freeX = Number(placement.x);
@@ -286,7 +296,7 @@ async function renderPdf(file: {
   layout?: string;
   margin?: string;
   stack?: string;
-  placement?: { fit?: boolean; scale?: number; alignX?: string; alignY?: string; x?: number; y?: number };
+  placement?: { fit?: boolean; sizing?: string; scale?: number; alignX?: string; alignY?: string; x?: number; y?: number };
 }) {
   const doc = new PDFDocument({
     autoFirstPage: false,
@@ -312,7 +322,7 @@ async function renderPdf(file: {
     const imageFile = typeof item === "string" ? item : item.path;
     const rotation = typeof item === "string" ? 0 : Number(item.rotation) || 0;
     const source = await imageForPdf(imageFile, rotation);
-    const size = sizeOf(source);
+    const size = typeof source === "string" ? await imageSizeFromFile(source) : imageSize(source);
     const imageWidth = size.width || 0;
     const imageHeight = size.height || 0;
     if (!imageWidth || !imageHeight) throw new Error("无法读取图片尺寸");
@@ -324,7 +334,10 @@ async function renderPdf(file: {
       const image = prepared[i];
       doc.addPage({ size: pageSize, margin: 0 });
       const box = placeOnPage(image.width, image.height, doc.page.width, doc.page.height, file.placement);
+      doc.save();
+      doc.rect(0, 0, doc.page.width, doc.page.height).clip();
       doc.image(image.source, box.x, box.y, { width: box.width, height: box.height });
+      doc.restore();
     }
   } else if (prepared.length) {
     doc.addPage({ size: pageSize, margin: 0 });
@@ -531,6 +544,7 @@ ipcMain.handle("print_sheet", async (_event, data: string) => {
     margin: "none",
     placement: {
       fit: options.fit !== false,
+      sizing: options.sizing,
       scale: options.scale,
       alignX: options.alignX,
       alignY: options.alignY,

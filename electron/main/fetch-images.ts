@@ -1,7 +1,7 @@
 import { BrowserWindow, app, net } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import sizeOf from "image-size";
+import { imageSize } from "image-size";
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MIN_EDGE = 100;
@@ -39,7 +39,7 @@ function extensionFor(mime: string, url: string) {
 function saveImage(buffer: Buffer, ext: string, dir: string) {
   if (buffer.length < 64 || buffer.length > MAX_BYTES) return "";
   try {
-    const size = sizeOf(buffer);
+    const size = imageSize(buffer);
     if (!size.width || !size.height) return "";
     if (size.width < MIN_EDGE || size.height < MIN_EDGE) return "";
   } catch {
