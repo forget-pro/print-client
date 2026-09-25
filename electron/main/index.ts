@@ -11,6 +11,7 @@ import { layoutImagePages } from "./pdf-layout";
 import { renderEdit } from "./image-edit";
 import { paperPoints } from "../../src/paper";
 import { IMAGE_EXT } from "../../src/files";
+import { readSettings, updateFeed, writeSettings } from "./settings";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -73,7 +74,7 @@ function imagePathsFromArgv(argv: string[], cwd?: string) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg || arg.startsWith("-")) continue;
-    if (!/\.(jpe?g|png|webp)$/i.test(arg)) continue;
+    if (!IMAGE_EXT.test(arg)) continue;
     const resolved = path.resolve(base, arg);
     try {
       if (fs.statSync(resolved).isFile()) files.push(resolved);
@@ -97,7 +98,7 @@ function publishOpens(files: string[]) {
 
 function assertImageFile(filePath: string) {
   const resolved = path.resolve(filePath);
-  if (!/\.(jpe?g|png|webp)$/i.test(resolved)) throw new Error("无法读取图片");
+  if (!IMAGE_EXT.test(resolved)) throw new Error("无法读取图片");
   if (!fs.statSync(resolved).isFile()) throw new Error("无法读取图片");
   return resolved;
 }
@@ -170,6 +171,7 @@ async function createWindow() {
 
   win.webContents.on("did-finish-load", () => {
     setupUpdater();
+    if (app.isPackaged && readSettings().checkOnStartup) autoUpdater.checkForUpdates().catch(() => {});
   });
 
   // Make all links open with the browser, not with the application
@@ -192,7 +194,7 @@ app.whenReady().then(() => {
     if (process.platform === "win32" && /^\/[A-Za-z]:\//.test(filePath)) {
       filePath = filePath.slice(1);
     }
-    if (!/\.(jpe?g|png|webp|gif|pdf)$/i.test(filePath)) {
+    if (!IMAGE_EXT.test(filePath) && !/\.(gif|pdf)$/i.test(filePath)) {
       return new Response("Forbidden", { status: 403 });
     }
     return net.fetch(pathToFileURL(filePath).href);
@@ -227,7 +229,10 @@ ipcMain.handle("openDialogSync", () => {
   const result = dialog.showOpenDialogSync(win, {
     title: "选择图片或文件夹",
     buttonLabel: "添加",
-    filters: [{ name: "图片", extensions: ["jpg", "jpeg", "png", "webp"] }],
+    filters: [
+      { name: "图片", extensions: ["jpg", "jpeg", "jpe", "jfif", "png", "webp"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
     properties: ["openFile", "openDirectory", "multiSelections"],
   });
   if (!result?.length) return [];
@@ -583,6 +588,10 @@ function sendUpdate(payload: { status: string; version?: string; percent?: numbe
 
 let updaterReady = false;
 
+function applyUpdateFeed() {
+  autoUpdater.setFeedURL(updateFeed(readSettings().updateProxy));
+}
+
 function setupUpdater() {
   if (!app.isPackaged || updaterReady) return;
   updaterReady = true;
@@ -590,6 +599,9 @@ function setupUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on("update-available", (info) => {
     sendUpdate({ status: "available", version: info.version });
+  });
+  autoUpdater.on("update-not-available", () => {
+    sendUpdate({ status: "current" });
   });
   autoUpdater.on("download-progress", (progress) => {
     sendUpdate({ status: "downloading", percent: Math.round(progress.percent) });
@@ -600,8 +612,33 @@ function setupUpdater() {
   autoUpdater.on("error", () => {
     sendUpdate({ status: "error" });
   });
-  autoUpdater.checkForUpdates().catch(() => {});
+  applyUpdateFeed();
 }
+
+ipcMain.handle("get_settings", () => readSettings());
+
+ipcMain.handle("save_settings", (_event, data: string) => {
+  const prev = readSettings();
+  const next = writeSettings(JSON.parse(data));
+  if (app.isPackaged && prev.updateProxy !== next.updateProxy) {
+    applyUpdateFeed();
+    if (next.checkOnStartup) autoUpdater.checkForUpdates().catch(() => {});
+  }
+  return next;
+});
+
+ipcMain.handle("check_update", async () => {
+  if (!app.isPackaged) return { ok: false, reason: "unpackaged" };
+  if (!updaterReady) setupUpdater();
+  applyUpdateFeed();
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const version = result?.updateInfo?.version || "";
+    return { ok: true, version, available: Boolean(version && version !== app.getVersion()) };
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+});
 
 ipcMain.handle("app_version", () => app.getVersion());
 

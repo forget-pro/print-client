@@ -1,3 +1,9 @@
+!macro customWelcomePage
+  !define MUI_WELCOMEPAGE_TITLE "欢迎安装图片打印"
+  !define MUI_WELCOMEPAGE_TEXT "将把图片打印安装到你的电脑。$\r$\n$\r$\n安装完成后，可以在图片的「打开方式」里找到它，不会替换系统默认的看图程序。"
+  !insertmacro MUI_PAGE_WELCOME
+!macroend
+
 !macro customInstall
   WriteRegStr HKCU "Software\Classes\PicPrint.Image" "" "图片打印"
   WriteRegStr HKCU "Software\Classes\PicPrint.Image" "FriendlyAppName" "图片打印"

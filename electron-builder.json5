@@ -3,7 +3,7 @@
   $schema: "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   appId: "com.picprint.app",
   asar: true,
-  productName: "pic-print",
+  productName: "图片打印",
   icon: "build/icon.png",
   directories: {
     output: "release/${version}",
@@ -14,27 +14,37 @@
     releaseType: "release",
   },
   mac: {
+    executableName: "pic-print",
     target: ["dmg"],
-    artifactName: "${productName}-Mac-${version}-Installer.${ext}",
+    artifactName: "pic-print-Mac-${version}-Installer.${ext}",
   },
   win: {
+    executableName: "pic-print",
     target: [
       {
         target: "nsis",
         arch: ["x64"],
       },
     ],
-    artifactName: "${productName}-Windows-${version}-Setup.${ext}",
+    artifactName: "pic-print-Windows-${version}-Setup.${ext}",
   },
   nsis: {
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
     deleteAppDataOnUninstall: false,
+    installerLanguages: ["zh_CN"],
+    language: "2052",
+    shortcutName: "图片打印",
+    uninstallDisplayName: "图片打印 ${version}",
+    installerSidebar: "installerSidebar.bmp",
+    uninstallerSidebar: "installerSidebar.bmp",
+    installerHeader: "installerHeader.bmp",
     include: "build/installer.nsh",
   },
   linux: {
+    executableName: "pic-print",
     target: ["AppImage"],
-    artifactName: "${productName}-Linux-${version}.${ext}",
+    artifactName: "pic-print-Linux-${version}.${ext}",
   },
 }

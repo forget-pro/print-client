@@ -44,9 +44,7 @@ jobs:
         shell: bash
         run: |
           version=$(node --input-type=module -e "import {readFileSync} from 'node:fs'; process.stdout.write(JSON.parse(readFileSync('package.json','utf8')).version)")
-          product=$(node --input-type=module -e "import {readFileSync} from 'node:fs'; const text = readFileSync('electron-builder.json5','utf8').replace(/\\/\\/.*/g,''); const match = text.match(/productName:\\s*\"([^\"]+)\"/); if (!match) process.exit(1); process.stdout.write(match[1])")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "product=$product" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push version
         shell: bash
@@ -70,8 +68,8 @@ jobs:
             ## 图片打印 v${{ steps.meta.outputs.version }}
             安装包发布后，已安装的客户端会自动检测到这个版本。
           files: |
-            release/${{ steps.meta.outputs.version }}/${{ steps.meta.outputs.product }}-Windows-${{ steps.meta.outputs.version }}-Setup.exe
-            release/${{ steps.meta.outputs.version }}/${{ steps.meta.outputs.product }}-Windows-${{ steps.meta.outputs.version }}-Setup.exe.blockmap
+            release/${{ steps.meta.outputs.version }}/pic-print-Windows-${{ steps.meta.outputs.version }}-Setup.exe
+            release/${{ steps.meta.outputs.version }}/pic-print-Windows-${{ steps.meta.outputs.version }}-Setup.exe.blockmap
             release/${{ steps.meta.outputs.version }}/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

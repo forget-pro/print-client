@@ -1,4 +1,4 @@
-export const IMAGE_EXT = /\.(jpe?g|png|webp)$/i;
+export const IMAGE_EXT = /\.(jpe?g|jpe|jfif|pjpeg|pjp|png|webp)$/i;
 
 export function fileName(filePath: string) {
   return String(filePath).split(/[/\\]/).pop() || filePath;

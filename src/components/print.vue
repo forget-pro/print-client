@@ -41,28 +41,20 @@
               </a-menu>
             </template>
           </a-dropdown>
+          <a-button :disabled="!state.fileList.length" @click="dedupe">
+            <template #icon><filter-outlined /></template>
+            去重
+          </a-button>
           <a-button :disabled="!state.fileList.length" @click="clearAll">
             <template #icon><clear-outlined /></template>
             清空
           </a-button>
         </div>
         <div class="actions">
-          <a-button :disabled="!state.fileList.length" @click="dedupe">
-            <template #icon><filter-outlined /></template>
-            去重
-          </a-button>
-          <a-tooltip title="系统打开">
-            <span class="tip">
-              <a-button
-                class="icon-btn"
-                :disabled="!state.fileList.length || Boolean(state.outputMode)"
-                :loading="state.outputMode === 'system'"
-                aria-label="系统打开"
-                @click="openWithSystem"
-              >
-                <template #icon><export-outlined /></template>
-              </a-button>
-            </span>
+          <a-tooltip title="设置">
+            <a-button type="text" class="icon-btn" aria-label="设置" @click="state.settingsOpen = true">
+              <template #icon><setting-outlined /></template>
+            </a-button>
           </a-tooltip>
           <a-button
             type="primary"
@@ -199,6 +191,25 @@
       </div>
     </a-modal>
 
+    <a-modal v-model:open="state.settingsOpen" title="设置" :footer="null" :width="440">
+      <label class="setting">
+        <a-checkbox v-model:checked="settings.openPdfExternal">通过默认程序打开 PDF</a-checkbox>
+        <span>不勾选时，预览在软件内打开。</span>
+      </label>
+      <label class="setting">
+        <span class="setting-label">更新代理</span>
+        <a-select v-model:value="settings.updateProxy" class="setting-select" :options="proxyOptions" />
+        <span>访问 GitHub 较慢时，用代理检查更新。选「直接连接」则不用代理。</span>
+      </label>
+      <label class="setting">
+        <a-checkbox v-model:checked="settings.checkOnStartup">启动时检查更新</a-checkbox>
+      </label>
+      <div class="setting-foot">
+        <span>{{ state.version ? `当前版本 v${state.version}` : "当前版本" }}</span>
+        <a-button :loading="state.checkingUpdate" @click="checkUpdate">检查更新</a-button>
+      </div>
+    </a-modal>
+
     <a-modal
       v-model:open="state.updateOpen"
       title="发现新版本"
@@ -248,7 +259,6 @@ import {
   ClearOutlined,
   DeleteOutlined,
   EditOutlined,
-  ExportOutlined,
   EyeOutlined,
   FilePdfOutlined,
   FilterOutlined,
@@ -256,6 +266,7 @@ import {
   InboxOutlined,
   LinkOutlined,
   RotateRightOutlined,
+  SettingOutlined,
   SortAscendingOutlined,
 } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
@@ -283,6 +294,19 @@ const stackOptions = [
 ];
 
 const urlInput = ref(null);
+const proxyOptions = [
+  { label: "直接连接 GitHub", value: "" },
+  { label: "gh-proxy.org", value: "gh-proxy.org" },
+  { label: "gh-proxy.com", value: "gh-proxy.com" },
+  { label: "ghproxy.net", value: "ghproxy.net" },
+  { label: "ghfast.top", value: "ghfast.top" },
+];
+const settings = reactive({
+  openPdfExternal: false,
+  updateProxy: "",
+  checkOnStartup: true,
+});
+let settingsReady = false;
 
 const state = reactive({
   fileList: [],
@@ -292,6 +316,8 @@ const state = reactive({
   version: "",
   update: { status: "", version: "", percent: 0 },
   updateOpen: false,
+  settingsOpen: false,
+  checkingUpdate: false,
   pdfPath: "",
   pdfKey: "",
   fetchOpen: false,
@@ -313,7 +339,39 @@ const previewList = computed(() => state.fileList.map((item) => fileSrc(item.pat
 let uid = 0;
 let dragDepth = 0;
 
+function settingsPayload() {
+  return {
+    openPdfExternal: settings.openPdfExternal,
+    updateProxy: settings.updateProxy,
+    checkOnStartup: settings.checkOnStartup,
+    pageSize: state.pageSize,
+    layout: state.layout,
+    margin: state.margin,
+    stack: state.stack,
+  };
+}
+
+function persistSettings() {
+  if (!settingsReady || !window.ipcRenderer) return;
+  window.ipcRenderer.invoke("save_settings", JSON.stringify(settingsPayload())).catch(() => {});
+}
+
+async function loadSettings() {
+  const saved = await window.ipcRenderer?.invoke("get_settings").catch(() => null);
+  if (saved) {
+    settings.openPdfExternal = saved.openPdfExternal === true;
+    settings.updateProxy = proxyOptions.some((item) => item.value === saved.updateProxy) ? saved.updateProxy : "";
+    settings.checkOnStartup = saved.checkOnStartup !== false;
+    state.pageSize = saved.pageSize === "A3" ? "A3" : "A4";
+    state.layout = saved.layout === "landscape" ? "landscape" : "portrait";
+    state.margin = saved.margin === "small" ? "small" : "none";
+    state.stack = saved.stack === "vertical" ? "vertical" : "auto";
+  }
+  settingsReady = true;
+}
+
 onMounted(() => {
+  loadSettings();
   applyPrintEdit();
   window.ipcRenderer?.on("fetch_page_progress", (_event, progress) => {
     state.fetchPercent = progress?.percent || 0;
@@ -334,6 +392,8 @@ onMounted(() => {
 });
 
 onActivated(applyPrintEdit);
+
+watch(() => JSON.stringify(settingsPayload()), persistSettings);
 
 function toItem(filePath) {
   uid += 1;
@@ -539,7 +599,11 @@ async function openPreview() {
   state.outputMode = "preview";
   try {
     const pdfPath = await ensurePdfPath();
-    await router.push({ path: "/preview", query: { file: pdfPath } });
+    if (settings.openPdfExternal) {
+      await window.ipcRenderer.invoke("open_pdf_external", JSON.stringify({ path: pdfPath }));
+    } else {
+      await router.push({ path: "/preview", query: { file: pdfPath } });
+    }
   } catch {
     message.error("预览失败，请检查图片是否可以读取");
   } finally {
@@ -547,24 +611,27 @@ async function openPreview() {
   }
 }
 
-async function openWithSystem() {
-  if (!state.fileList.length) {
-    message.warning("请先添加图片");
-    return;
-  }
+async function checkUpdate() {
   if (!window.ipcRenderer) {
-    message.error("无法连接本地打印服务");
+    message.info("安装后的软件才会检查更新");
     return;
   }
-  if (state.outputMode) return;
-  state.outputMode = "system";
+  state.checkingUpdate = true;
   try {
-    const pdfPath = await ensurePdfPath();
-    await window.ipcRenderer.invoke("open_pdf_external", JSON.stringify({ path: pdfPath }));
+    const result = await window.ipcRenderer.invoke("check_update");
+    if (!result?.ok && result?.reason === "unpackaged") {
+      message.info("安装后的软件才会检查更新");
+      return;
+    }
+    if (!result?.ok) {
+      message.error("检查更新失败，请换一个代理或改为直接连接");
+      return;
+    }
+    if (!result.available) message.success("已是最新版本");
   } catch {
-    message.error("系统预览打开失败，请检查图片是否可以读取");
+    message.error("检查更新失败，请换一个代理或改为直接连接");
   } finally {
-    state.outputMode = "";
+    state.checkingUpdate = false;
   }
 }
 
@@ -620,7 +687,7 @@ async function onDrop(event) {
   dragDepth = 0;
   state.draggingOver = false;
   const dropped = Array.from(event.dataTransfer?.files || [])
-    .map((item) => item.path)
+    .map((item) => item.path || window.webUtils?.getPathForFile(item) || "")
     .filter(Boolean);
   if (!dropped.length) return;
   if (!window.ipcRenderer) {
@@ -790,13 +857,42 @@ button.version-badge {
   background: #e6ebf2;
 }
 
-.tip {
-  display: inline-flex;
-}
-
 .icon-btn {
   width: 32px;
   padding-inline: 0;
+  color: #8b95a5;
+}
+
+.icon-btn:hover {
+  color: #445066;
+  background: transparent;
+}
+
+.setting {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.setting-label {
+  color: #172033;
+  font-size: 14px;
+}
+
+.setting-select {
+  width: 100%;
+}
+
+.setting-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #8b95a5;
+  font-size: 12px;
 }
 
 .option {

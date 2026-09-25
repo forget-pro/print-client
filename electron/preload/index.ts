@@ -1,4 +1,4 @@
-import { ipcRenderer, contextBridge } from 'electron'
+import { ipcRenderer, contextBridge, webUtils } from 'electron'
 
 const wrappedListeners = new WeakMap<Function, (...args: any[]) => void>()
 
@@ -32,6 +32,12 @@ contextBridge.exposeInMainWorld('ipcRenderer', {
 
   // You can expose other APTs you need here.
   // ...
+})
+
+contextBridge.exposeInMainWorld('webUtils', {
+  getPathForFile(file: File) {
+    return webUtils.getPathForFile(file)
+  },
 })
 
 // --------- Preload scripts loading ---------
