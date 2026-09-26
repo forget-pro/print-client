@@ -4,6 +4,7 @@ import path from "node:path";
 import { imageSize } from "image-size";
 
 const MAX_BYTES = 15 * 1024 * 1024;
+const MAX_FETCH = 80;
 const MIN_EDGE = 100;
 
 type Progress = { percent: number; text: string };
@@ -163,30 +164,46 @@ function downloadImage(win: BrowserWindow, imageUrl: string, pageUrl: string) {
     });
     request.setHeader("Referer", `${page.origin}/`);
     request.setHeader("User-Agent", win.webContents.getUserAgent());
-    const timer = setTimeout(() => {
-      request.abort();
-      reject(new Error("下载超时"));
-    }, 20000);
-    const fail = (error: Error) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (error?: Error, value?: { buffer: Buffer; ext: string }) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      reject(error);
+      if (error) reject(error);
+      else if (value) resolve(value);
     };
+    timer = setTimeout(() => {
+      request.abort();
+      finish(new Error("下载超时"));
+    }, 20000);
     request.on("response", (response) => {
       const chunks: Buffer[] = [];
-      response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      let received = 0;
+      response.on("data", (chunk) => {
+        if (settled) return;
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        received += buf.length;
+        if (received > MAX_BYTES) {
+          request.abort();
+          finish(new Error("图片太大"));
+          return;
+        }
+        chunks.push(buf);
+      });
       response.on("end", () => {
-        clearTimeout(timer);
+        if (settled) return;
         const mime = String(response.headers["content-type"] || "");
         const ext = extensionFor(mime, image.href);
         if (!ext || response.statusCode >= 400) {
-          reject(new Error(`图片下载失败 ${response.statusCode} ${mime}`));
+          finish(new Error(`图片下载失败 ${response.statusCode} ${mime}`));
           return;
         }
-        resolve({ buffer: Buffer.concat(chunks), ext });
+        finish(undefined, { buffer: Buffer.concat(chunks), ext });
       });
-      response.on("error", fail);
+      response.on("error", (error) => finish(error));
     });
-    request.on("error", fail);
+    request.on("error", (error) => finish(error));
     request.end();
   });
 }
@@ -238,7 +255,7 @@ export async function fetchPageImages(pageUrl: string, report: Report = () => un
     await scrollToBottom(win, report);
 
     const found = await collectImageUrls(win);
-    const urls = found.urls || [];
+    const urls = (found.urls || []).slice(0, MAX_FETCH);
     const detected = found.detected || 0;
     reportProgress(
       report,

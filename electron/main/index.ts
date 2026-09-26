@@ -426,6 +426,12 @@ function jobCopies(job: PrintJob) {
   return Math.min(99, Math.max(1, Math.round(Number(job.copies)) || 1));
 }
 
+function jobDpi(job: PrintJob) {
+  const dpi = Math.round(Number(job.dpi));
+  if (dpi === 300 || dpi === 150) return dpi;
+  return 200;
+}
+
 function cupsEnv() {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -477,7 +483,10 @@ function lpArgs(filepath: string, job: PrintJob, detailed: boolean) {
     args.push("-o", `media=${cupsMedia(job)}`);
     const duplex = cupsDuplex(job);
     if (duplex) args.push("-o", `Duplex=${duplex}`);
-    if (job.grayscale) args.push("-o", "ColorModel=Gray");
+    if (job.grayscale) {
+      args.push("-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray");
+    }
+    if (Number(job.dpi) > 0) args.push("-o", `Resolution=${jobDpi(job)}dpi`);
     args.push("-o", "fit-to-page");
   }
   args.push(filepath);
@@ -596,7 +605,7 @@ async function printWithWindows(filepath: string, job: PrintJob) {
     "-File", scriptPath,
     "-Path", filepath,
     "-Copies", String(jobCopies(job)),
-    "-Dpi", String(job.dpi === 300 ? 300 : 200),
+    "-Dpi", String(jobDpi(job)),
   ];
   if (job.deviceName) args.push("-Printer", job.deviceName);
   if (job.duplex === true) args.push("-Duplex", job.duplexMode === "shortEdge" ? "short" : "long");
@@ -850,7 +859,7 @@ ipcMain.handle("check_update", async () => {
 ipcMain.handle("app_version", () => app.getVersion());
 
 ipcMain.handle("install_update", () => {
-  autoUpdater.quitAndInstall(false, true);
+  autoUpdater.quitAndInstall(true, true);
 });
 
 function finite(value: unknown, min: number, max: number) {
@@ -1028,14 +1037,20 @@ function hashFile(filePath: string) {
 ipcMain.handle("sort_files", async (_event, data: string) => {
   const info = JSON.parse(data);
   const files: string[] = Array.isArray(info.files) ? info.files : [];
-  const listed = await Promise.all(files.map(async (item) => {
-    const value = await stat(item);
-    return { path: item, birthtimeMs: value.birthtimeMs, mtimeMs: value.mtimeMs };
-  }));
+  const present: Array<{ path: string; birthtimeMs: number; mtimeMs: number }> = [];
+  const missing: string[] = [];
+  for (const item of files) {
+    try {
+      const value = await stat(item);
+      present.push({ path: item, birthtimeMs: value.birthtimeMs, mtimeMs: value.mtimeMs });
+    } catch {
+      missing.push(item);
+    }
+  }
   const key = info.type === "create" ? "birthtimeMs" : "mtimeMs";
   const direction = info.sort === "asc" ? 1 : -1;
-  listed.sort((a, b) => (a[key] - b[key]) * direction);
-  return listed.map((item) => item.path);
+  present.sort((a, b) => (a[key] - b[key]) * direction);
+  return present.map((item) => item.path).concat(missing);
 });
 const menu = Menu.buildFromTemplate([]);
 Menu.setApplicationMenu(process.platform === "darwin" ? menu : null);

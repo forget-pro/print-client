@@ -249,9 +249,7 @@
       :ok-button-props="{ disabled: state.update.status !== 'downloaded' }"
       @ok="installUpdate"
     >
-      <p class="update-copy">新版本 v{{ state.update.version || "…" }} 可以安装。</p>
-      <p v-if="state.update.status === 'downloaded'" class="update-copy">下载完成，重启后会自动安装。</p>
-      <p v-else class="update-copy">正在下载 {{ state.update.percent }}%</p>
+      <p v-if="state.update.status !== 'downloaded'" class="update-copy">正在下载 {{ state.update.percent }}%</p>
       <a-progress
         :percent="state.update.status === 'downloaded' ? 100 : state.update.percent"
         :show-info="false"

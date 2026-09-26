@@ -20,10 +20,11 @@ type Hooks = {
 type Phone = { name: string; seen: number; reason: "leave" | "idle"; socket: WebSocket };
 
 const IDLE_MS = 30 * 60 * 1000;
-const LOCAL_PORT = 17321;
+const LOCAL_PORTS = [17321, 17322, 17323, 17324, 17325];
 
 let server: http.Server | null = null;
 let probe: http.Server | null = null;
+let probeGeneration = 0;
 let bonjour: Bonjour | null = null;
 let hooks: Hooks | null = null;
 let token = "";
@@ -96,24 +97,55 @@ function stopAdvertiser() {
   }
 }
 
+function serveProbe(req: http.IncomingMessage, res: http.ServerResponse) {
+  const url = new URL(req.url || "/", "http://127.0.0.1");
+  if (req.method !== "GET" || url.pathname !== "/session" || !token || !currentPort) {
+    sendJson(res, 404, { ok: false });
+    return;
+  }
+  sendJson(res, 200, { ok: true, port: currentPort, token });
+}
+
+function listenLocal(port: number) {
+  return new Promise<http.Server>((resolve, reject) => {
+    const active = http.createServer(serveProbe);
+    const fail = (error: Error) => {
+      active.close();
+      reject(error);
+    };
+    active.once("error", fail);
+    active.listen(port, "127.0.0.1", () => {
+      active.off("error", fail);
+      resolve(active);
+    });
+  });
+}
+
 function startLocalProbe() {
+  void openLocalProbe();
+}
+
+async function openLocalProbe() {
   stopLocalProbe();
-  const active = http.createServer((req, res) => {
-    const url = new URL(req.url || "/", "http://127.0.0.1");
-    if (req.method !== "GET" || url.pathname !== "/session" || !token || !currentPort) {
-      sendJson(res, 404, { ok: false });
+  const generation = probeGeneration;
+  for (const port of LOCAL_PORTS) {
+    if (generation !== probeGeneration) return;
+    try {
+      const active = await listenLocal(port);
+      if (generation !== probeGeneration) {
+        active.close();
+        return;
+      }
+      probe = active;
       return;
+    } catch {
+      // 这个端口已被占用，试下一个
     }
-    sendJson(res, 200, { ok: true, port: currentPort, token });
-  });
-  probe = active;
-  active.on("error", () => {
-    if (probe === active) probe = null;
-  });
-  active.listen(LOCAL_PORT, "127.0.0.1");
+  }
 }
 
 function stopLocalProbe() {
+  probeGeneration += 1;
   const active = probe;
   probe = null;
   if (!active) return;
