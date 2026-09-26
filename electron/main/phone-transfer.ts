@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import Bonjour from "bonjour-service";
+import { logError, logInfo, logWarn } from "./session-log";
 
 type Arrival = { path: string; name: string; hash: string };
 type Hooks = {
@@ -40,7 +41,10 @@ export function startPhoneTransfer(options: Hooks) {
   if (server && currentPort && token) return Promise.resolve(sessionInfo());
   if (starting) return starting;
   const ip = lanIPv4();
-  if (!ip) return Promise.reject(new Error("没有可用的局域网地址"));
+  if (!ip) {
+    logError("没有可用的局域网地址");
+    return Promise.reject(new Error("没有可用的局域网地址"));
+  }
   token = randomBytes(8).toString("hex");
   clients = new Map();
   currentIp = ip;
@@ -50,7 +54,13 @@ export function startPhoneTransfer(options: Hooks) {
     currentPort = typeof address === "object" && address ? address.port : 0;
     advertise(currentPort, token);
     startLocalProbe();
-    return sessionInfo();
+    const info = sessionInfo();
+    logInfo(`传图服务已启动 ${info.ip}:${info.port}`);
+    return info;
+  }).catch((error: unknown) => {
+    const text = error instanceof Error ? error.message : "传图服务启动失败";
+    logError(text);
+    throw error;
   }).finally(() => {
     starting = null;
   });
@@ -58,6 +68,7 @@ export function startPhoneTransfer(options: Hooks) {
 }
 
 export function stopPhoneTransfer() {
+  const running = Boolean(server || probe);
   hooks = null;
   token = "";
   currentPort = 0;
@@ -75,6 +86,7 @@ export function stopPhoneTransfer() {
   }
   stopAdvertiser();
   stopLocalProbe();
+  if (running) logInfo("传图服务已关闭");
 }
 
 function sessionInfo() {
@@ -114,7 +126,7 @@ function listenLocal(port: number) {
       reject(error);
     };
     active.once("error", fail);
-    active.listen(port, "127.0.0.1", () => {
+    active.listen(port, "0.0.0.0", () => {
       active.off("error", fail);
       resolve(active);
     });
@@ -137,11 +149,15 @@ async function openLocalProbe() {
         return;
       }
       probe = active;
+      const address = active.address();
+      const bound = typeof address === "object" && address ? address.port : port;
+      logInfo(`本机探测已打开，端口 ${bound}`);
       return;
     } catch {
       // 这个端口已被占用，试下一个
     }
   }
+  if (generation === probeGeneration) logWarn("本机探测端口都被占用");
 }
 
 function stopLocalProbe() {

@@ -434,18 +434,42 @@ function schedule(immediate = false) {
   timer = window.setTimeout(requestPreview, 90);
 }
 
+function turnCrop(degrees) {
+  const turns = ((degrees % 360) + 360) % 360;
+  const { x, y, w, h } = crop;
+  if (turns === 90) {
+    crop.x = 1 - y - h;
+    crop.y = x;
+    crop.w = h;
+    crop.h = w;
+  } else if (turns === 180) {
+    crop.x = 1 - x - w;
+    crop.y = 1 - y - h;
+  } else if (turns === 270) {
+    crop.x = y;
+    crop.y = 1 - x - w;
+    crop.w = h;
+    crop.h = w;
+  }
+}
+
+function mirrorCrop(axis) {
+  if (axis === "h") crop.x = 1 - crop.x - crop.w;
+  else crop.y = 1 - crop.y - crop.h;
+}
+
 function rotateBy(degrees) {
+  if (cropping.value) cancelCrop();
   rotation.value = (rotation.value + degrees + 360) % 360;
-  cropping.value = false;
-  resetCrop();
+  turnCrop(degrees);
   schedule(true);
 }
 
 function toggleFlip(axis) {
+  if (cropping.value) cancelCrop();
   if (axis === "h") flipH.value = !flipH.value;
   else flipV.value = !flipV.value;
-  cropping.value = false;
-  resetCrop();
+  mirrorCrop(axis);
   schedule(true);
 }
 

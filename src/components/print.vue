@@ -68,6 +68,16 @@
           </a-button>
         </div>
         <div class="actions">
+          <a-tooltip title="运行日志">
+            <a-button type="text" class="icon-btn" aria-label="运行日志" @click="openLogs">
+              <template #icon>
+                <svg class="log-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="1" y="2" width="22" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="1.8" />
+                  <path d="M5.2 9.2 8.6 12.2 5.2 15.2M11.2 15.2h7.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </template>
+            </a-button>
+          </a-tooltip>
           <a-tooltip title="设置">
             <a-button type="text" class="icon-btn" aria-label="设置" @click="state.settingsOpen = true">
               <template #icon><setting-outlined /></template>
@@ -241,6 +251,23 @@
       </div>
     </a-modal>
 
+    <a-drawer
+      v-model:open="state.logOpen"
+      root-class-name="log-drawer"
+      placement="bottom"
+      height="55%"
+      title="运行日志"
+      @after-open-change="onLogOpen"
+    >
+      <div ref="logBox" class="log-term">
+        <p v-if="!state.logs.length" class="log-empty">这次运行还没有日志</p>
+        <div v-for="item in state.logs" :key="item.id" class="log-line" :class="item.level">
+          <span class="log-time">[{{ item.time }}]</span>
+          <span class="log-msg">{{ item.message }}</span>
+        </div>
+      </div>
+    </a-drawer>
+
     <a-modal
       v-model:open="state.updateOpen"
       title="发现新版本"
@@ -373,7 +400,24 @@ const state = reactive({
   layout: "portrait",
   margin: "none",
   stack: "auto",
+  logOpen: false,
+  logs: [],
 });
+
+const logBox = ref(null);
+
+function scrollLogs() {
+  const box = logBox.value;
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+function openLogs() {
+  state.logOpen = true;
+}
+
+function onLogOpen(open) {
+  if (open) nextTick(scrollLogs);
+}
 
 const previewList = computed(() => state.fileList.map((item) => fileSrc(item.path)));
 
@@ -430,6 +474,15 @@ onMounted(() => {
   window.ipcRenderer?.invoke("app_version").then((version) => {
     if (version) state.version = version;
   }).catch(() => {});
+  window.ipcRenderer?.invoke("get_logs").then((list) => {
+    if (Array.isArray(list)) state.logs = list;
+  }).catch(() => {});
+  window.ipcRenderer?.on("session_log", (_event, entry) => {
+    if (!entry?.id) return;
+    state.logs.push(entry);
+    if (state.logs.length > 400) state.logs.splice(0, state.logs.length - 400);
+    if (state.logOpen) nextTick(scrollLogs);
+  });
   const phonePending = new Set();
   window.ipcRenderer?.on("phone_transfer", async (_event, payload) => {
     if (payload?.type === "offer" && payload.hash) {
@@ -1099,6 +1152,12 @@ button.version-badge {
   background: transparent;
 }
 
+.log-icon {
+  width: 1em;
+  height: 1em;
+  display: block;
+}
+
 .setting {
   display: flex;
   flex-direction: column;
@@ -1338,5 +1397,83 @@ button.version-badge {
   .metrics {
     width: 100%;
   }
+}
+</style>
+
+<style>
+.log-drawer .ant-drawer-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: #101418;
+}
+
+.log-drawer .ant-drawer-wrapper-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.log-drawer .ant-drawer-header {
+  background: #101418;
+  border-bottom: 1px solid #2c333d;
+}
+
+.log-drawer .ant-drawer-title {
+  color: #e6ebf2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.log-drawer .ant-drawer-close {
+  color: #c5cdd8;
+}
+
+.log-drawer .ant-drawer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #101418;
+}
+
+.log-term {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 18px 18px;
+  background: #101418;
+  color: #d5dbe3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.log-empty {
+  margin: 0;
+  color: #7d8794;
+}
+
+.log-line {
+  display: flex;
+  gap: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-time {
+  flex: none;
+  color: #7d8794;
+}
+
+.log-line.warn {
+  color: #f5c542;
+}
+
+.log-line.error {
+  color: #ff5d5d;
 }
 </style>

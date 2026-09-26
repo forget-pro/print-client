@@ -14,6 +14,7 @@ import { paperPoints } from "../../src/paper";
 import { IMAGE_EXT } from "../../src/files";
 import { readSettings, updateFeed, writeSettings } from "./settings";
 import { startPhoneTransfer, stopPhoneTransfer } from "./phone-transfer";
+import { logError, logInfo, logWarn, sessionLogs } from "./session-log";
 import { stat } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
@@ -173,6 +174,7 @@ async function createWindow() {
   }
 
   win.webContents.on("did-finish-load", () => {
+    logInfo(`软件已启动 v${app.getVersion()}`);
     setupUpdater();
     if (app.isPackaged && readSettings().checkOnStartup) autoUpdater.checkForUpdates().catch(() => {});
   });
@@ -823,9 +825,12 @@ function setupUpdater() {
     sendUpdate({ status: "downloading", percent: Math.round(progress.percent) });
   });
   autoUpdater.on("update-downloaded", (info) => {
+    logInfo(`新版本 v${info.version} 已下载`);
     sendUpdate({ status: "downloaded", version: info.version });
   });
-  autoUpdater.on("error", () => {
+  autoUpdater.on("error", (error) => {
+    const text = error instanceof Error ? error.message : "检查更新失败";
+    logError(text);
     sendUpdate({ status: "error" });
   });
   applyUpdateFeed();
@@ -936,37 +941,57 @@ ipcMain.handle("print_pdf", async (_event, data) => {
   const payload = JSON.parse(data);
   const copies = Number(payload?.copies) || 1;
   const deviceName = payload?.deviceName || "";
-  if (Array.isArray(payload?.sheets)) {
-    const filepath = await composePrintPdf(payload);
-    try {
-      return await printPdfFile(filepath, {
-        copies,
-        deviceName,
-        grayscale: Boolean(payload.grayscale),
-        duplex: Boolean(payload.duplex),
-        duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
-        collate: Boolean(payload.collate),
-        dpi: payload.quality === "high" ? 300 : 150,
-        paper: typeof payload.paper === "string" ? payload.paper : "",
-        paperWidth: Number(payload.paperWidth) || undefined,
-        paperHeight: Number(payload.paperHeight) || undefined,
-      });
-    } finally {
-      fs.promises.unlink(filepath).catch(() => {});
+  logInfo(`开始打印${deviceName ? `，打印机 ${deviceName}` : ""}，${copies} 份`);
+  try {
+    if (Array.isArray(payload?.sheets)) {
+      const filepath = await composePrintPdf(payload);
+      try {
+        const result = await printPdfFile(filepath, {
+          copies,
+          deviceName,
+          grayscale: Boolean(payload.grayscale),
+          duplex: Boolean(payload.duplex),
+          duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
+          collate: Boolean(payload.collate),
+          dpi: payload.quality === "high" ? 300 : 150,
+          paper: typeof payload.paper === "string" ? payload.paper : "",
+          paperWidth: Number(payload.paperWidth) || undefined,
+          paperHeight: Number(payload.paperHeight) || undefined,
+        });
+        logInfo("打印已发送");
+        return result;
+      } finally {
+        fs.promises.unlink(filepath).catch(() => {});
+      }
     }
+    if (payload?.path) {
+      const result = await printPdfFile(assertPreviewPdf(payload.path), copies, deviceName);
+      logInfo("打印已发送");
+      return result;
+    }
+    const ready = await ensurePdf(payload);
+    const result = await printPdfFile(ready.path, copies, deviceName);
+    logInfo("打印已发送");
+    return result;
+  } catch (error) {
+    logError(error instanceof Error ? error.message : "打印失败");
+    throw error;
   }
-  if (payload?.path) return printPdfFile(assertPreviewPdf(payload.path), copies, deviceName);
-  const result = await ensurePdf(payload);
-  return printPdfFile(result.path, copies, deviceName);
 });
 
 ipcMain.handle("fetch_page_images", async (event, pageUrl: string) => {
+  const address = String(pageUrl || "").trim().slice(0, 120);
+  logInfo(`开始抓取 ${address}`);
   try {
-    return await fetchPageImages(pageUrl, (progress) => {
+    const result = await fetchPageImages(pageUrl, (progress) => {
       event.sender.send("fetch_page_progress", progress);
     });
+    if (result.saved) logInfo(`抓取完成，保存 ${result.saved} 张`);
+    else logWarn("抓取完成，没有保存图片");
+    return result;
   } catch (error) {
     const text = error instanceof Error ? error.message : "抓取失败";
+    logError(text);
     return { files: [], detected: 0, saved: 0, error: text };
   }
 });
@@ -994,10 +1019,20 @@ ipcMain.handle("phone_transfer_start", (event) => {
       send({ type: "offer", id, hash });
     }),
     cancel: (hash) => send({ type: "offer-cancel", hash }),
-    onJoin: (devices) => send({ type: "join", devices }),
+    onJoin: (devices) => {
+      logInfo(`手机已连接：${devices.join("、") || "手机"}`);
+      send({ type: "join", devices });
+    },
     onClients: (devices) => send({ type: "clients", devices }),
-    onImage: (file) => send({ type: "image", path: file.path, name: file.name, hash: file.hash }),
-    onDisconnect: (session) => send({ type: "disconnect", reason: session.reason }),
+    onImage: (file) => {
+      logInfo(`收到图片 ${file.name}`);
+      send({ type: "image", path: file.path, name: file.name, hash: file.hash });
+    },
+    onDisconnect: (session) => {
+      if (session.reason === "idle") logWarn("手机超过 30 分钟没有传图，连接已结束");
+      else logInfo("手机已断开");
+      send({ type: "disconnect", reason: session.reason });
+    },
   });
 });
 
@@ -1014,6 +1049,8 @@ ipcMain.handle("phone_transfer_discard", async (_event, filePath: unknown) => {
   if (path.dirname(resolved) !== dirpath) return;
   await fs.promises.unlink(resolved).catch(() => {});
 });
+
+ipcMain.handle("get_logs", () => sessionLogs());
 
 ipcMain.handle("phone_transfer_stop", () => {
   stopPhoneTransfer();
