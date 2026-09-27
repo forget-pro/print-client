@@ -1,6 +1,7 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { metaGet, metaSet } from "./db";
 
 export const UPDATE_PROXIES = ["gh-proxy.org", "gh-proxy.com", "ghproxy.net", "ghfast.top"] as const;
 
@@ -47,21 +48,31 @@ export function normalizeSettings(value: Partial<AppSettings> | null | undefined
   };
 }
 
-export function readSettings(): AppSettings {
+function readSettingsFile(): Partial<AppSettings> | null {
   try {
-    return normalizeSettings(JSON.parse(fs.readFileSync(settingsPath(), "utf8")));
+    return JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
   } catch {
-    return { ...DEFAULTS };
+    return null;
   }
+}
+
+export function readSettings(): AppSettings {
+  const stored = metaGet("settings");
+  if (stored) {
+    try {
+      return normalizeSettings(JSON.parse(stored));
+    } catch {
+      return { ...DEFAULTS };
+    }
+  }
+  const next = normalizeSettings(readSettingsFile());
+  metaSet("settings", JSON.stringify(next));
+  return next;
 }
 
 export function writeSettings(value: Partial<AppSettings>): AppSettings {
   const next = normalizeSettings({ ...readSettings(), ...value });
-  const file = settingsPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(next, null, 2));
-  fs.renameSync(temp, file);
+  metaSet("settings", JSON.stringify(next));
   return next;
 }
 

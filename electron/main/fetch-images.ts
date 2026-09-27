@@ -14,11 +14,6 @@ function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function log(step: string, detail?: unknown) {
-  if (detail === undefined) console.log(`[抓取图片] ${step}`);
-  else console.log(`[抓取图片] ${step}`, detail);
-}
-
 function randomName() {
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let result = "";
@@ -37,7 +32,14 @@ function extensionFor(mime: string, url: string) {
   return "";
 }
 
-function saveImage(buffer: Buffer, ext: string, dir: string) {
+function fileTitle(value: string) {
+  const text = value.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 40);
+  if (text.length < 2) return "";
+  if (/^(image|img|photo|picture|icon|logo|banner|undefined|null|图片|图像|照片)$/i.test(text)) return "";
+  return text;
+}
+
+function saveImage(buffer: Buffer, ext: string, dir: string, title = "") {
   if (buffer.length < 64 || buffer.length > MAX_BYTES) return "";
   try {
     const size = imageSize(buffer);
@@ -46,7 +48,13 @@ function saveImage(buffer: Buffer, ext: string, dir: string) {
   } catch {
     return "";
   }
-  const file = path.join(dir, `${randomName()}${ext}`);
+  const base = fileTitle(title) || randomName();
+  let file = path.join(dir, `${base}${ext}`);
+  let index = 2;
+  while (fs.existsSync(file)) {
+    file = path.join(dir, `${base}-${index}${ext}`);
+    index += 1;
+  }
   fs.writeFileSync(file, buffer);
   return file;
 }
@@ -212,6 +220,16 @@ async function collectImageUrls(win: BrowserWindow) {
   return win.webContents.executeJavaScript(`(() => {
     const urls = [];
     const seen = new Set();
+    const titleOf = (img) => {
+      const figure = img.closest("figure");
+      const caption = figure ? (figure.querySelector("figcaption") || {}).textContent : "";
+      const bits = [img.getAttribute("alt"), img.getAttribute("title"), img.getAttribute("aria-label"), caption];
+      for (const bit of bits) {
+        const text = String(bit || "").replace(/\\s+/g, " ").trim();
+        if (text) return text.slice(0, 80);
+      }
+      return "";
+    };
     document.querySelectorAll("img").forEach((img) => {
       const value = img.currentSrc || img.getAttribute("src") || "";
       if (!value || value.startsWith("data:") || value.startsWith("blob:")) return;
@@ -226,10 +244,10 @@ async function collectImageUrls(win: BrowserWindow) {
       const width = img.naturalWidth || img.clientWidth || 0;
       const height = img.naturalHeight || img.clientHeight || 0;
       const small = width > 0 && height > 0 && (width < ${MIN_EDGE} || height < ${MIN_EDGE});
-      if (!small) urls.push(href);
+      if (!small) urls.push({ url: href, title: titleOf(img) });
     });
     return { urls, detected: seen.size };
-  })()`) as Promise<{ urls: string[]; detected: number }>;
+  })()`) as Promise<{ urls: Array<{ url: string; title: string }>; detected: number }>;
 }
 
 export async function fetchPageImages(pageUrl: string, report: Report = () => undefined) {
@@ -263,26 +281,19 @@ export async function fetchPageImages(pageUrl: string, report: Report = () => un
       urls.length ? `准备保存 ${urls.length} 张图片` : detected ? `检测到 ${detected} 张，没有可打印的图片` : "没有发现图片"
     );
     const files: string[] = [];
-    let missed = 0;
     for (let index = 0; index < urls.length; index += 1) {
-      const url = urls[index];
+      const item = urls[index];
       reportProgress(report, 74 + ((index + 1) / urls.length) * 26, `正在保存 ${index + 1}/${urls.length}`);
       try {
-        const image = await downloadImage(win, url, target.href);
-        const file = saveImage(image.buffer, image.ext, dir);
+        const image = await downloadImage(win, item.url, target.href);
+        const file = saveImage(image.buffer, image.ext, dir, item.title);
         if (file) files.push(file);
-        else missed += 1;
-      } catch (error) {
-        missed += 1;
-        log("这张没有抓到", { index: index + 1, url, error: error instanceof Error ? error.message : error });
+      } catch {
+        // 单张失败不影响后面的图片
       }
     }
-    log("抓取结束", { detected, saved: files.length, missed });
     reportProgress(report, 100, `检测到 ${detected} 张，已抓取 ${files.length} 张`);
     return { files, detected, saved: files.length };
-  } catch (error) {
-    log("抓取失败", error instanceof Error ? error.message : error);
-    throw error;
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }

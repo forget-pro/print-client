@@ -419,6 +419,13 @@ onMounted(() => {
   window.ipcRenderer?.invoke("list_printers").then((list) => {
     printers.value = list || [];
   }).catch(() => {});
+  window.ipcRenderer?.invoke("get_print_profile").then((profile) => {
+    if (!profile) return;
+    if (profile.printer) printer.value = profile.printer;
+    copies.value = Math.min(99, Math.max(1, Number(profile.copies) || 1));
+    if (profile.paper === "A3" || profile.paper === "A4") paper.value = profile.paper;
+    if (profile.layout === "landscape" || profile.layout === "portrait") orientation.value = profile.layout;
+  }).catch(() => {});
   loadPreview();
 });
 

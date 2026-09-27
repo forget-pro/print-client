@@ -268,6 +268,7 @@ watch(open, (value) => {
     return;
   }
   ensurePrinters();
+  applyPrintProfile();
   ensurePdf();
   nextTick(measureStage);
 });
@@ -361,6 +362,17 @@ async function ensurePrinters() {
   } catch {
     printers.value = [];
   }
+}
+
+async function applyPrintProfile() {
+  const profile = await window.ipcRenderer?.invoke("get_print_profile").catch(() => null);
+  if (!profile || !open.value) return;
+  if (profile.printer) printer.value = profile.printer;
+  copies.value = Math.min(99, Math.max(1, Number(profile.copies) || 1));
+  quality.value = profile.quality === "high" ? "high" : "standard";
+  grayscale.value = profile.grayscale === true;
+  duplex.value = profile.duplex === true;
+  duplexEdge.value = profile.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge";
 }
 
 async function ensurePdf() {

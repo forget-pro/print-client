@@ -13,6 +13,18 @@ import { renderEdit } from "./image-edit";
 import { paperPoints } from "../../src/paper";
 import { IMAGE_EXT } from "../../src/files";
 import { readSettings, updateFeed, writeSettings } from "./settings";
+import {
+  addPrintRecord,
+  clearPrintRecords,
+  closeDatabase,
+  listPrintRecords,
+  listRecentUrls,
+  printStats,
+  rememberPrint,
+  rememberUrl,
+  readPrintProfile,
+  type PrintProfile,
+} from "./db";
 import { startPhoneTransfer, stopPhoneTransfer } from "./phone-transfer";
 import { logError, logInfo, logWarn, sessionLogs } from "./session-log";
 import { stat } from "node:fs/promises";
@@ -35,7 +47,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 //
 process.env.APP_ROOT = path.join(__dirname, "../..");
 
-export const MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
 export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 
@@ -345,6 +356,7 @@ async function renderPdf(file: {
   const dirpath = path.join(app.getPath("documents"), "pic_print");
   fs.mkdirSync(dirpath, { recursive: true });
   const filepath = path.join(dirpath, `${generateRandomString()}.pdf`);
+  let pageCount = 0;
   const outputStream = fs.createWriteStream(filepath);
   const finished = new Promise((resolve, reject) => {
     outputStream.on("finish", () => resolve(filepath));
@@ -373,6 +385,7 @@ async function renderPdf(file: {
     for (let i = 0; i < prepared.length; i++) {
       const image = prepared[i];
       doc.addPage({ size: pageSize, margin: 0 });
+      pageCount += 1;
       const box = placeOnPage(image.width, image.height, doc.page.width, doc.page.height, file.placement);
       doc.save();
       doc.rect(0, 0, doc.page.width, doc.page.height).clip();
@@ -381,6 +394,7 @@ async function renderPdf(file: {
     }
   } else if (prepared.length) {
     doc.addPage({ size: pageSize, margin: 0 });
+    pageCount += 1;
     const boxWidth = doc.page.width - pageMargin * 2;
     const boxHeight = doc.page.height - pageMargin * 2;
     const pages = layoutImagePages(
@@ -390,7 +404,10 @@ async function renderPdf(file: {
       file.stack === "vertical" ? "vertical" : "auto",
     );
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-      if (pageIndex > 0) doc.addPage({ size: pageSize, margin: 0 });
+      if (pageIndex > 0) {
+        doc.addPage({ size: pageSize, margin: 0 });
+        pageCount += 1;
+      }
       const page = pages[pageIndex];
       for (let i = 0; i < page.length; i++) {
         const item = page[i];
@@ -408,7 +425,7 @@ async function renderPdf(file: {
 
   doc.end();
   await finished;
-  return filepath;
+  return { path: filepath, pages: pageCount };
 }
 
 type PrintJob = {
@@ -627,7 +644,7 @@ function printPdfFile(filepath: string, copies: number | PrintJob = 1, deviceNam
   return printWithLp(filepath, job);
 }
 
-let pdfCache: { key: string; path: string } | null = null;
+let pdfCache: { key: string; path: string; pages: number } | null = null;
 
 function pdfCacheKey(file: {
   files?: Array<string | { path: string; rotation?: number }>;
@@ -657,7 +674,6 @@ function pdfCacheKey(file: {
     layout: file.layout === "landscape" ? "landscape" : "portrait",
     margin: file.margin === "small" ? "small" : "none",
     stack: file.stack === "vertical" ? "vertical" : "auto",
-    flow: "fit",
   });
 }
 
@@ -670,11 +686,26 @@ async function ensurePdf(file: {
 }) {
   const key = pdfCacheKey(file);
   if (pdfCache && pdfCache.key === key && fs.existsSync(pdfCache.path)) {
-    return { path: pdfCache.path, reused: true };
+    return { path: pdfCache.path, pages: pdfCache.pages, reused: true };
   }
-  const filepath = await renderPdf(file);
-  pdfCache = { key, path: filepath };
-  return { path: filepath, reused: false };
+  const rendered = await renderPdf(file);
+  const kept = archiveGeneratedPdf(rendered.path, rendered.pages);
+  await fs.promises.unlink(rendered.path).catch(() => {});
+  addPrintRecord({
+    source: "preview",
+    printer: "",
+    copies: 1,
+    paper: file.size === "A3" ? "A3" : "A4",
+    pages: kept.pages,
+    summary: path.basename(kept.path),
+    status: "ok",
+    error: "",
+    filePath: kept.path,
+    fileSize: kept.size,
+    pageCount: kept.pages,
+  });
+  pdfCache = { key, path: kept.path, pages: kept.pages };
+  return { path: kept.path, pages: kept.pages, reused: false };
 }
 
 ipcMain.handle("preview_pdf", async (_event, data) => ensurePdf(JSON.parse(data)));
@@ -737,51 +768,156 @@ ipcMain.handle("render_edit", async (_event, data: string) => {
 
 ipcMain.handle("list_printers", (event) => event.sender.getPrintersAsync());
 
+function imageSummary(images: Array<{ path?: string; edit?: { path?: string } }>) {
+  const names = images.map((item) => {
+    const file = item?.edit?.path || item?.path || "";
+    return path.basename(file);
+  }).filter(Boolean);
+  if (!names.length) return "图片";
+  const text = names.slice(0, 3).join("、");
+  return names.length > 3 ? `${text} 等 ${names.length} 张` : text;
+}
+
+function generatedPdfDir() {
+  const dirpath = path.join(app.getPath("documents"), "pic_print_pdf");
+  fs.mkdirSync(dirpath, { recursive: true });
+  return dirpath;
+}
+
+function archiveGeneratedPdf(source: string, pages: number) {
+  const dirpath = generatedPdfDir();
+  const target = path.join(dirpath, `${generateRandomString()}.pdf`);
+  fs.copyFileSync(source, target);
+  return {
+    path: target,
+    size: fs.statSync(target).size,
+    pages: Math.max(0, Math.round(pages) || 0),
+  };
+}
+
+function countPdfPages(filePath: string) {
+  if (pdfCache && path.resolve(pdfCache.path) === path.resolve(filePath) && pdfCache.pages > 0) return pdfCache.pages;
+  const raw = fs.readFileSync(filePath).toString("latin1");
+  return raw.match(/\/Type\s*\/Page(?!s)/g)?.length || 1;
+}
+
+type PrintNote = {
+  source: "pdf" | "image";
+  printer: string;
+  copies: number;
+  paper: string;
+  pages: number;
+  summary: string;
+};
+
+type KeptPdf = { path: string; size: number; pages: number };
+
+function notePrinted(record: PrintNote, profile?: Partial<PrintProfile>, file?: KeptPdf | null) {
+  addPrintRecord({
+    ...record,
+    summary: file?.path ? path.basename(file.path) : record.summary,
+    pages: file?.pages || record.pages,
+    status: "ok",
+    error: "",
+    filePath: file?.path || "",
+    fileSize: file?.size || 0,
+    pageCount: file?.pages || record.pages,
+  });
+  if (profile) rememberPrint(profile);
+}
+
+function notePrintFailed(record: PrintNote, error: unknown, file?: KeptPdf | null) {
+  const text = error instanceof Error ? error.message : "打印失败";
+  addPrintRecord({
+    ...record,
+    summary: file?.path ? path.basename(file.path) : record.summary,
+    pages: file?.pages || record.pages,
+    status: "error",
+    error: text,
+    filePath: file?.path || "",
+    fileSize: file?.size || 0,
+    pageCount: file?.pages || 0,
+  });
+  return text;
+}
+
 ipcMain.handle("print_sheet", async (_event, data: string) => {
   const options = JSON.parse(data);
   const images = Array.isArray(options.images) ? options.images : [];
-  const dirpath = path.join(app.getPath("documents"), "pic_print");
-  fs.mkdirSync(dirpath, { recursive: true });
-  const files: string[] = [];
-  for (let i = 0; i < images.length; i++) {
-    const item = images[i];
-    if (item?.edit?.path) {
-      const file = assertImageFile(item.edit.path);
-      const rendered = await renderEdit(file, item.edit, false, "png");
-      const png = path.join(dirpath, `${generateRandomString()}.png`);
-      fs.writeFileSync(png, rendered.data);
-      files.push(png);
-    } else if (item?.path) {
-      files.push(assertImageFile(item.path));
+  const copies = Number(options.copies) || 1;
+  const deviceName = String(options.deviceName || "");
+  const paper = options.size === "A3" ? "A3" : "A4";
+  const record = {
+    source: "image" as const,
+    printer: deviceName,
+    copies,
+    paper,
+    pages: images.length || 1,
+    summary: imageSummary(images),
+  };
+  logInfo(`开始打印${deviceName ? `，打印机 ${deviceName}` : ""}，${copies} 份`);
+  let kept: KeptPdf | null = null;
+  try {
+    const dirpath = path.join(app.getPath("documents"), "pic_print");
+    fs.mkdirSync(dirpath, { recursive: true });
+    const files: string[] = [];
+    for (let i = 0; i < images.length; i++) {
+      const item = images[i];
+      if (item?.edit?.path) {
+        const file = assertImageFile(item.edit.path);
+        const rendered = await renderEdit(file, item.edit, false, "png");
+        const png = path.join(dirpath, `${generateRandomString()}.png`);
+        fs.writeFileSync(png, rendered.data);
+        files.push(png);
+      } else if (item?.path) {
+        files.push(assertImageFile(item.path));
+      }
     }
+    if (!files.length) throw new Error("没有可打印的图片");
+    const rendered = await renderPdf({
+      files,
+      size: paper,
+      layout: options.layout === "landscape" ? "landscape" : "portrait",
+      margin: "none",
+      placement: {
+        fit: options.fit !== false,
+        sizing: options.sizing,
+        scale: options.scale,
+        alignX: options.alignX,
+        alignY: options.alignY,
+        x: options.x,
+        y: options.y,
+      },
+    });
+    kept = archiveGeneratedPdf(rendered.path, rendered.pages);
+    await fs.promises.unlink(rendered.path).catch(() => {});
+    record.pages = kept.pages;
+    const result = await printPdfFile(kept.path, {
+      copies,
+      deviceName,
+      paper,
+    });
+    notePrinted(record, {
+      printer: deviceName,
+      copies,
+      paper,
+      layout: options.layout === "landscape" ? "landscape" : "portrait",
+    }, kept);
+    logInfo("打印已发送");
+    return result;
+  } catch (error) {
+    logError(notePrintFailed(record, error, kept));
+    throw error;
   }
-  if (!files.length) throw new Error("没有可打印的图片");
-  const pdf = await renderPdf({
-    files,
-    size: options.size === "A3" ? "A3" : "A4",
-    layout: options.layout === "landscape" ? "landscape" : "portrait",
-    margin: "none",
-    placement: {
-      fit: options.fit !== false,
-      sizing: options.sizing,
-      scale: options.scale,
-      alignX: options.alignX,
-      alignY: options.alignY,
-      x: options.x,
-      y: options.y,
-    },
-  });
-  return printPdfFile(pdf, {
-    copies: Number(options.copies) || 1,
-    deviceName: options.deviceName || "",
-    paper: options.size === "A3" ? "A3" : "A4",
-  });
 });
 
 function assertPreviewPdf(filePath: string) {
-  const dir = path.resolve(app.getPath("documents"), "pic_print");
   const resolved = path.resolve(filePath);
-  const inside = resolved === dir || resolved.startsWith(`${dir}${path.sep}`);
+  const dirs = [
+    path.resolve(app.getPath("documents"), "pic_print"),
+    path.resolve(generatedPdfDir()),
+  ];
+  const inside = dirs.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`));
   if (!inside || !resolved.toLowerCase().endsWith(".pdf") || !fs.existsSync(resolved)) {
     throw new Error("预览文件不存在");
   }
@@ -886,7 +1022,7 @@ async function composePrintPdf(payload: {
   if (!sheets.length) throw new Error("没有要打印的页面");
   const clip = payload.clip || {};
   const doc = new PDFDocument({ autoFirstPage: false, margin: 0 });
-  const filepath = path.join(os.tmpdir(), `pic-print-${generateRandomString()}.pdf`);
+  const filepath = path.join(generatedPdfDir(), `${generateRandomString()}.pdf`);
   const outputStream = fs.createWriteStream(filepath);
   const finished = new Promise((resolve, reject) => {
     outputStream.on("finish", () => resolve(filepath));
@@ -917,7 +1053,7 @@ async function composePrintPdf(payload: {
   }
   doc.end();
   await finished;
-  return filepath;
+  return { path: filepath, pages: sheets.length, size: fs.statSync(filepath).size };
 }
 
 ipcMain.handle("open_printer_properties", async (_event, deviceName: string) => {
@@ -941,40 +1077,64 @@ ipcMain.handle("print_pdf", async (_event, data) => {
   const payload = JSON.parse(data);
   const copies = Number(payload?.copies) || 1;
   const deviceName = payload?.deviceName || "";
+  const paper = payload?.paper === "A3" ? "A3" : payload?.paper === "A4" ? "A4" : "";
+  const sheets = Array.isArray(payload?.sheets) ? payload.sheets.length : 0;
+  const summary = sheets
+    ? `PDF ${sheets} 页`
+    : (typeof payload?.path === "string" && payload.path ? path.basename(payload.path) : "预览文档");
+  const record = {
+    source: "pdf" as const,
+    printer: deviceName,
+    copies,
+    paper,
+    pages: sheets || 1,
+    summary,
+  };
   logInfo(`开始打印${deviceName ? `，打印机 ${deviceName}` : ""}，${copies} 份`);
+  let kept: KeptPdf | null = null;
   try {
+    let result: { cancelled: boolean };
     if (Array.isArray(payload?.sheets)) {
-      const filepath = await composePrintPdf(payload);
-      try {
-        const result = await printPdfFile(filepath, {
-          copies,
-          deviceName,
-          grayscale: Boolean(payload.grayscale),
-          duplex: Boolean(payload.duplex),
-          duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
-          collate: Boolean(payload.collate),
-          dpi: payload.quality === "high" ? 300 : 150,
-          paper: typeof payload.paper === "string" ? payload.paper : "",
-          paperWidth: Number(payload.paperWidth) || undefined,
-          paperHeight: Number(payload.paperHeight) || undefined,
-        });
-        logInfo("打印已发送");
-        return result;
-      } finally {
-        fs.promises.unlink(filepath).catch(() => {});
-      }
+      const composed = await composePrintPdf(payload);
+      kept = { path: composed.path, size: composed.size, pages: composed.pages };
+      record.pages = composed.pages;
+      result = await printPdfFile(composed.path, {
+        copies,
+        deviceName,
+        grayscale: Boolean(payload.grayscale),
+        duplex: Boolean(payload.duplex),
+        duplexMode: payload.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
+        collate: Boolean(payload.collate),
+        dpi: payload.quality === "high" ? 300 : 150,
+        paper: typeof payload.paper === "string" ? payload.paper : "",
+        paperWidth: Number(payload.paperWidth) || undefined,
+        paperHeight: Number(payload.paperHeight) || undefined,
+      });
+    } else if (payload?.path) {
+      const preview = assertPreviewPdf(payload.path);
+      const pages = countPdfPages(preview);
+      kept = archiveGeneratedPdf(preview, pages);
+      record.pages = kept.pages;
+      result = await printPdfFile(kept.path, copies, deviceName);
+    } else {
+      const ready = await ensurePdf(payload);
+      kept = archiveGeneratedPdf(ready.path, ready.pages);
+      record.pages = kept.pages;
+      result = await printPdfFile(kept.path, copies, deviceName);
     }
-    if (payload?.path) {
-      const result = await printPdfFile(assertPreviewPdf(payload.path), copies, deviceName);
-      logInfo("打印已发送");
-      return result;
-    }
-    const ready = await ensurePdf(payload);
-    const result = await printPdfFile(ready.path, copies, deviceName);
+    notePrinted(record, {
+      printer: deviceName,
+      copies,
+      quality: payload?.quality === "high" ? "high" : "standard",
+      grayscale: Boolean(payload?.grayscale),
+      duplex: Boolean(payload?.duplex),
+      duplexEdge: payload?.duplexEdge === "shortEdge" ? "shortEdge" : "longEdge",
+      ...(paper ? { paper } : {}),
+    }, kept);
     logInfo("打印已发送");
     return result;
   } catch (error) {
-    logError(error instanceof Error ? error.message : "打印失败");
+    logError(notePrintFailed(record, error, kept));
     throw error;
   }
 });
@@ -988,6 +1148,7 @@ ipcMain.handle("fetch_page_images", async (event, pageUrl: string) => {
     });
     if (result.saved) logInfo(`抓取完成，保存 ${result.saved} 张`);
     else logWarn("抓取完成，没有保存图片");
+    rememberUrl(String(pageUrl || ""), result.saved || 0);
     return result;
   } catch (error) {
     const text = error instanceof Error ? error.message : "抓取失败";
@@ -1052,6 +1213,35 @@ ipcMain.handle("phone_transfer_discard", async (_event, filePath: unknown) => {
 
 ipcMain.handle("get_logs", () => sessionLogs());
 
+ipcMain.handle("get_print_jobs", (_event, offset: unknown) => {
+  return listPrintRecords(Number(offset) || 0);
+});
+
+ipcMain.handle("get_print_stats", () => printStats());
+
+ipcMain.handle("clear_print_jobs", () => {
+  const dirpath = generatedPdfDir();
+  for (const filePath of clearPrintRecords()) {
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(`${dirpath}${path.sep}`)) continue;
+    fs.promises.unlink(resolved).catch(() => {});
+  }
+});
+
+ipcMain.handle("open_saved_pdf", async (_event, filePath: unknown) => {
+  if (typeof filePath !== "string" || !filePath) return false;
+  const dirpath = generatedPdfDir();
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(`${dirpath}${path.sep}`) || !fs.existsSync(resolved)) return false;
+  const errorText = await shell.openPath(resolved);
+  if (errorText) throw new Error(errorText);
+  return true;
+});
+
+ipcMain.handle("get_print_profile", () => readPrintProfile());
+
+ipcMain.handle("get_recent_urls", () => listRecentUrls());
+
 ipcMain.handle("phone_transfer_stop", () => {
   stopPhoneTransfer();
 });
@@ -1100,19 +1290,20 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   stopPhoneTransfer();
   const dirpath = path.join(app.getPath("documents"), "pic_print");
-  let entries: string[] = [];
   try {
-    entries = fs.readdirSync(dirpath);
-  } catch {
-    return;
-  }
-  for (let i = 0; i < entries.length; i++) {
-    const itemPath = path.join(dirpath, entries[i]);
-    try {
-      if (fs.statSync(itemPath).isFile()) fs.unlinkSync(itemPath);
-    } catch (err) {
-      console.log(err);
+    const entries = fs.readdirSync(dirpath);
+    for (let i = 0; i < entries.length; i++) {
+      const itemPath = path.join(dirpath, entries[i]);
+      try {
+        if (fs.statSync(itemPath).isFile()) fs.unlinkSync(itemPath);
+      } catch {
+        // 单个文件删不掉就跳过
+      }
     }
+  } catch {
+    // 目录不存在时不用清理
+  } finally {
+    closeDatabase();
   }
 });
 

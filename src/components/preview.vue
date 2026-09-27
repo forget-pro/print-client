@@ -32,7 +32,7 @@
       <p v-else-if="error" class="status">{{ error }}</p>
       <canvas
         v-for="page in pages"
-        :key="`${filePath}-${page}`"
+        :key="page"
         :ref="(el) => setCanvas(page, el)"
         :data-page="page"
         class="sheet"

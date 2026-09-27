@@ -68,6 +68,11 @@
           </a-button>
         </div>
         <div class="actions">
+          <a-tooltip title="转换记录">
+            <a-button type="text" class="icon-btn" aria-label="转换记录" @click="openHistory">
+              <template #icon><history-outlined /></template>
+            </a-button>
+          </a-tooltip>
           <a-tooltip title="运行日志">
             <a-button type="text" class="icon-btn" aria-label="运行日志" @click="openLogs">
               <template #icon>
@@ -209,6 +214,17 @@
         @pressEnter="fetchFromUrl"
         @change="state.fetchError = ''"
       />
+      <div v-if="state.recentUrls.length" class="recent-urls">
+        <button
+          v-for="item in state.recentUrls"
+          :key="item.url"
+          type="button"
+          :disabled="state.fetchLoading"
+          @click="useRecentUrl(item.url)"
+        >
+          {{ item.url }}
+        </button>
+      </div>
       <p v-if="state.fetchError" class="fetch-error">{{ state.fetchError }}</p>
       <div v-if="state.fetchLoading || state.fetchText" class="fetch-progress">
         <div class="fetch-status">
@@ -252,17 +268,96 @@
     </a-modal>
 
     <a-drawer
+      v-model:open="state.historyOpen"
+      root-class-name="history-drawer"
+      placement="bottom"
+      height="82%"
+      title="转换记录"
+    >
+      <template #extra>
+        <a-button type="text" :disabled="!state.history.length" @click="clearHistory">清空</a-button>
+      </template>
+      <div class="history-panel">
+        <aside class="history-side">
+          <div class="stat-cards">
+            <div>
+              <span>今日</span>
+              <strong>{{ state.stats.today.sheets }}</strong>
+              <em>页 · {{ state.stats.today.ok }} 次</em>
+            </div>
+            <div>
+              <span>本月</span>
+              <strong>{{ state.stats.month.sheets }}</strong>
+              <em>页 · {{ state.stats.month.ok }} 次</em>
+            </div>
+            <div>
+              <span>累计</span>
+              <strong>{{ state.stats.total.sheets }}</strong>
+              <em>页 · {{ state.stats.total.ok }} 次</em>
+            </div>
+          </div>
+          <div class="stat-chart">
+            <canvas ref="usageChart" />
+          </div>
+          <p class="stat-meta">
+            近 7 天页数 · 本月 A4 {{ state.stats.papers.a4 }} 页 · A3 {{ state.stats.papers.a3 }} 页
+            <template v-if="state.stats.month.failed"> · 失败 {{ state.stats.month.failed }} 次</template>
+          </p>
+        </aside>
+        <section class="history-board">
+          <p v-if="!state.history.length" class="history-empty">{{ state.stats.total.jobs ? "记录列表是空的" : "还没有转换记录" }}</p>
+          <div v-else ref="historyBox" class="history-list" @scroll="onHistoryScroll">
+            <div class="history-head">
+              <span>时间</span>
+              <span>内容</span>
+              <span>页数</span>
+              <span>大小</span>
+              <span>状态</span>
+            </div>
+            <template v-for="group in historyGroups" :key="group.label">
+              <h3 class="history-day">{{ group.label }}</h3>
+              <button
+                v-for="item in group.items"
+                :key="item.id"
+                type="button"
+                class="history-row"
+                :class="[item.status, { openable: item.fileExists }]"
+                :disabled="!item.fileExists"
+                @click="openSavedPdf(item)"
+              >
+                <span class="history-time">{{ formatHistoryClock(item.createdAt) }}</span>
+                <span class="history-text">
+                  {{ historyText(item) }}
+                  <small v-if="item.status === 'error' && item.error">{{ item.error }}</small>
+                </span>
+                <span>{{ item.pageCount || item.pages || 0 }} 页</span>
+                <span>{{ item.fileSize ? formatBytes(item.fileSize) : "—" }}</span>
+                <span class="history-status">{{ item.fileExists ? "可打开" : item.status === "ok" ? "已生成" : "失败" }}</span>
+              </button>
+            </template>
+            <p v-if="state.historyLoading" class="history-more">正在加载</p>
+            <p v-else-if="state.history.length < state.historyTotal" class="history-more">继续下滑加载更早的记录</p>
+          </div>
+        </section>
+      </div>
+    </a-drawer>
+
+    <a-drawer
       v-model:open="state.logOpen"
       root-class-name="log-drawer"
       placement="bottom"
-      height="55%"
+      height="82%"
       title="运行日志"
       @after-open-change="onLogOpen"
     >
+      <template #extra>
+        <span class="log-count">{{ state.logs.length }} 条 · 本次运行</span>
+      </template>
       <div ref="logBox" class="log-term">
         <p v-if="!state.logs.length" class="log-empty">这次运行还没有日志</p>
         <div v-for="item in state.logs" :key="item.id" class="log-line" :class="item.level">
-          <span class="log-time">[{{ item.time }}]</span>
+          <span class="log-time">{{ item.time }}</span>
+          <span class="log-level">{{ logLevelText(item.level) }}</span>
           <span class="log-msg">{{ item.message }}</span>
         </div>
       </div>
@@ -308,7 +403,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onDeactivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { VueDraggable } from "vue-draggable-plus";
 import {
@@ -319,6 +414,7 @@ import {
   EyeOutlined,
   FilePdfOutlined,
   FilterOutlined,
+  HistoryOutlined,
   FolderOpenOutlined,
   InboxOutlined,
   LinkOutlined,
@@ -328,10 +424,19 @@ import {
   SortAscendingOutlined,
 } from "@ant-design/icons-vue";
 import { Modal, message } from "ant-design-vue";
-import { throttle } from "lodash-es";
 import { beginEdit, takeEditResult } from "../edit-session";
 import QRCode from "qrcode";
 import { IMAGE_EXT, fileName, fileSrc } from "../files";
+import {
+  BarController,
+  BarElement,
+  CategoryScale,
+  Chart,
+  LinearScale,
+  Tooltip,
+} from "chart.js";
+
+Chart.register(BarController, BarElement, CategoryScale, LinearScale, Tooltip);
 defineOptions({ name: "Print" });
 
 const router = useRouter();
@@ -402,17 +507,206 @@ const state = reactive({
   stack: "auto",
   logOpen: false,
   logs: [],
+  historyOpen: false,
+  history: [],
+  historyTotal: 0,
+  historyLoading: false,
+  stats: emptyStats(),
+  recentUrls: [],
 });
 
 const logBox = ref(null);
 
 function scrollLogs() {
   const box = logBox.value;
-  if (box) box.scrollTop = box.scrollHeight;
+  if (box) box.scrollTop = 0;
 }
 
 function openLogs() {
   state.logOpen = true;
+}
+
+function logLevelText(level) {
+  if (level === "warn") return "警告";
+  if (level === "error") return "错误";
+  return "信息";
+}
+
+function historyText(item) {
+  const file = String(item.filePath || item.summary || "").split(/[/\\]/).pop();
+  return file || "PDF";
+}
+
+function emptyStats() {
+  const span = () => ({ jobs: 0, ok: 0, failed: 0, sheets: 0 });
+  return {
+    today: span(),
+    month: span(),
+    total: span(),
+    days: [],
+    papers: { a4: 0, a3: 0 },
+    printers: [],
+  };
+}
+
+const historyBox = ref(null);
+const usageChart = ref(null);
+let usageChartInstance = null;
+
+const historyGroups = computed(() => {
+  const groups = [];
+  for (const item of state.history) {
+    const label = historyDayLabel(item.createdAt);
+    const last = groups[groups.length - 1];
+    if (!last || last.label !== label) groups.push({ label, items: [item] });
+    else last.items.push(item);
+  }
+  return groups;
+});
+
+function historyDayLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const start = (day) => new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+  const diff = Math.round((start(new Date()) - start(date)) / 86400000);
+  if (diff === 0) return "今天";
+  if (diff === 1) return "昨天";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatHistoryClock(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatBytes(size) {
+  const bytes = Number(size) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function drawCharts() {
+  usageChartInstance?.destroy();
+  usageChartInstance = null;
+  if (!usageChart.value) return;
+  usageChartInstance = new Chart(usageChart.value, {
+    type: "bar",
+    data: {
+      labels: state.stats.days.map((day) => day.label),
+      datasets: [{
+        label: "页数",
+        data: state.stats.days.map((day) => day.sheets || 0),
+        backgroundColor: "#3b82f6",
+        hoverBackgroundColor: "#1d4ed8",
+        borderRadius: 8,
+        maxBarThickness: 36,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { top: 8 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#172033",
+          displayColors: false,
+          callbacks: {
+            label(item) {
+              return `${item.parsed.y} 页`;
+            },
+          },
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          border: { display: false },
+          grid: { color: "#eef2f6" },
+          ticks: { precision: 0, color: "#8b95a5", font: { size: 12 } },
+        },
+        x: {
+          border: { display: false },
+          grid: { display: false },
+          ticks: { color: "#667085", font: { size: 12 } },
+        },
+      },
+    },
+  });
+}
+
+async function openSavedPdf(item) {
+  if (!item?.fileExists || !item.filePath) return;
+  try {
+    if (settings.openPdfExternal) {
+      await window.ipcRenderer?.invoke("open_saved_pdf", item.filePath);
+      return;
+    }
+    state.historyOpen = false;
+    await router.push({ path: "/preview", query: { file: item.filePath } });
+  } catch {
+    message.error("PDF 打开失败");
+  }
+}
+
+async function loadHistory(reset) {
+  if (state.historyLoading) return;
+  if (!reset && state.history.length >= state.historyTotal) return;
+  state.historyLoading = true;
+  const offset = reset ? 0 : state.history.length;
+  try {
+    const page = await window.ipcRenderer?.invoke("get_print_jobs", offset).catch(() => null);
+    const items = Array.isArray(page?.items) ? page.items : [];
+    state.historyTotal = items.length ? (Number(page?.total) || 0) : state.history.length;
+    state.history = reset ? items : state.history.concat(items);
+  } finally {
+    state.historyLoading = false;
+  }
+  nextTick(() => {
+    const box = historyBox.value;
+    if (box && box.scrollHeight <= box.clientHeight + 8) loadHistory(false);
+  });
+}
+
+function onHistoryScroll(event) {
+  const box = event.target;
+  if (!box || state.historyLoading || state.history.length >= state.historyTotal) return;
+  if (box.scrollTop + box.clientHeight >= box.scrollHeight - 80) loadHistory(false);
+}
+
+async function openHistory() {
+  const stats = await window.ipcRenderer?.invoke("get_print_stats").catch(() => null);
+  state.stats = stats || emptyStats();
+  await loadHistory(true);
+  state.historyOpen = true;
+  nextTick(() => {
+    requestAnimationFrame(drawCharts);
+    const box = historyBox.value;
+    if (box && box.scrollHeight <= box.clientHeight + 8) loadHistory(false);
+  });
+}
+
+function clearHistory() {
+  Modal.confirm({
+    title: "清空转换记录",
+    content: "转换记录和对应的 PDF 会删掉。今日、本月和累计的页数会保留。传过来的图片仍在退出时清理。",
+    okText: "清空",
+    cancelText: "取消",
+    onOk: async () => {
+      await window.ipcRenderer?.invoke("clear_print_jobs").catch(() => {});
+      state.history = [];
+      state.historyTotal = 0;
+    },
+  });
+}
+
+function useRecentUrl(url) {
+  state.pageUrl = url;
+  state.fetchError = "";
 }
 
 function onLogOpen(open) {
@@ -455,6 +749,10 @@ async function loadSettings() {
   settingsReady = true;
 }
 
+onBeforeUnmount(() => {
+  usageChartInstance?.destroy();
+});
+
 onMounted(() => {
   loadSettings();
   applyPrintEdit();
@@ -475,12 +773,12 @@ onMounted(() => {
     if (version) state.version = version;
   }).catch(() => {});
   window.ipcRenderer?.invoke("get_logs").then((list) => {
-    if (Array.isArray(list)) state.logs = list;
+    if (Array.isArray(list)) state.logs = list.slice().reverse();
   }).catch(() => {});
   window.ipcRenderer?.on("session_log", (_event, entry) => {
     if (!entry?.id) return;
-    state.logs.push(entry);
-    if (state.logs.length > 400) state.logs.splice(0, state.logs.length - 400);
+    state.logs.unshift(entry);
+    if (state.logs.length > 400) state.logs.length = 400;
     if (state.logOpen) nextTick(scrollLogs);
   });
   const phonePending = new Set();
@@ -685,10 +983,11 @@ async function openPhone() {
   }
 }
 
-function openFetch() {
+async function openFetch() {
   state.fetchError = "";
   state.fetchText = "";
   state.fetchPercent = 0;
+  state.recentUrls = (await window.ipcRenderer?.invoke("get_recent_urls").catch(() => [])) || [];
   state.fetchOpen = true;
 }
 
@@ -1060,6 +1359,204 @@ button.version-badge {
   font-size: 13px;
 }
 
+.recent-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.recent-urls button {
+  overflow: hidden;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: #f4f7fb;
+  color: #445066;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.recent-urls button:hover {
+  background: #e7eef8;
+}
+
+.history-panel {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(340px, 0.86fr) minmax(460px, 1.14fr);
+  gap: 20px;
+  min-height: 0;
+}
+
+.history-side,
+.history-board {
+  min-width: 0;
+  min-height: 0;
+}
+
+.history-side {
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stat-cards div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f4f7fb;
+}
+
+.stat-cards span,
+.stat-cards em {
+  color: #8b95a5;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.stat-cards strong {
+  color: #172033;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.stat-chart {
+  flex: 1;
+  min-height: 240px;
+  margin-top: 16px;
+}
+
+.stat-meta,
+.stat-printers {
+  margin: 10px 0 0;
+  color: #667085;
+  font-size: 12px;
+}
+
+.stat-printers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.history-board {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e7ebf2;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.history-empty {
+  margin: auto;
+  color: #8b95a5;
+  text-align: center;
+}
+
+.history-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.history-more {
+  margin: 0;
+  padding: 12px;
+  color: #8b95a5;
+  font-size: 12px;
+  text-align: center;
+}
+
+.history-head,
+.history-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 72px 84px 72px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+}
+
+.history-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: #8b95a5;
+  font-size: 12px;
+}
+
+.history-day {
+  margin: 0;
+  padding: 12px 14px 4px;
+  color: #172033;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.history-row {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid #f2f4f7;
+  background: transparent;
+  color: #243044;
+  font-size: 13px;
+  text-align: left;
+}
+
+.history-row.openable {
+  cursor: pointer;
+}
+
+.history-row.openable:hover {
+  background: #f8fafc;
+}
+
+.history-row:disabled {
+  cursor: default;
+}
+
+.history-time {
+  color: #8b95a5;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-text small {
+  display: block;
+  overflow: hidden;
+  color: #c2410c;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-status {
+  color: #157347;
+}
+
+.history-row.error .history-status {
+  color: #c2410c;
+}
+
 .phone-box {
   display: flex;
   flex-direction: column;
@@ -1401,79 +1898,136 @@ button.version-badge {
 </style>
 
 <style>
-.log-drawer .ant-drawer-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+.log-drawer .ant-drawer-content-wrapper {
   overflow: hidden;
-  background: #101418;
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -12px 40px rgba(15, 23, 42, 0.18);
 }
 
+.log-drawer .ant-drawer-content,
 .log-drawer .ant-drawer-wrapper-body {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  background: #141920;
 }
 
 .log-drawer .ant-drawer-header {
-  background: #101418;
-  border-bottom: 1px solid #2c333d;
+  flex: none;
+  padding: 16px 22px;
+  background: #141920;
+  border-bottom: 1px solid #2a3340;
 }
 
 .log-drawer .ant-drawer-title {
-  color: #e6ebf2;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #f4f7fb;
+  font-size: 16px;
+  font-weight: 640;
 }
 
 .log-drawer .ant-drawer-close {
-  color: #c5cdd8;
+  color: #c5ceda;
+}
+
+.log-count {
+  color: #8b95a8;
+  font-size: 13px;
 }
 
 .log-drawer .ant-drawer-body {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
   padding: 0;
   overflow: hidden;
-  background: #101418;
+  background: #141920;
 }
 
 .log-term {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 14px 18px 18px;
-  background: #101418;
-  color: #d5dbe3;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.7;
+  padding: 8px 0 20px;
+  background: #141920;
+  color: #d7dee8;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.log-term::-webkit-scrollbar {
+  width: 10px;
+}
+
+.log-term::-webkit-scrollbar-thumb {
+  border: 2px solid #141920;
+  border-radius: 99px;
+  background: #3a4454;
 }
 
 .log-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
   margin: 0;
-  color: #7d8794;
+  color: #8b95a8;
 }
 
 .log-line {
-  display: flex;
-  gap: 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
+  display: grid;
+  grid-template-columns: 92px 52px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 9px 22px;
+}
+
+.log-line + .log-line {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.log-time,
+.log-level {
+  font-variant-numeric: tabular-nums;
 }
 
 .log-time {
-  flex: none;
-  color: #7d8794;
+  color: #8b95a8;
 }
 
-.log-line.warn {
+.log-level {
+  color: #9aa6b8;
+}
+
+.log-msg {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-line.warn .log-level,
+.log-line.warn .log-msg {
   color: #f5c542;
 }
 
-.log-line.error {
-  color: #ff5d5d;
+.log-line.error .log-level,
+.log-line.error .log-msg {
+  color: #ff6b6b;
+}
+
+.history-drawer .ant-drawer-wrapper-body {
+  height: 100%;
+}
+
+.history-drawer .ant-drawer-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 </style>
