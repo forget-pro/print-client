@@ -1,5 +1,4 @@
 const IMAGE_GAP = 12;
-const MIN_SIDE = 144;
 
 export type ImageSpan = {
   width: number;
@@ -70,10 +69,10 @@ export function layoutImagePages(
     let remainW = boxWidth;
     let remainH = boxHeight;
 
-    while (index < images.length && remainW >= MIN_SIDE && remainH >= MIN_SIDE) {
+    while (index < images.length) {
       const image = images[index];
-      const size = contain(image.width, image.height, remainW, remainH);
-      if (placed.length > 0 && (size.width < MIN_SIDE || size.height < MIN_SIDE)) break;
+      const size = contain(image.width, image.height, boxWidth, boxHeight);
+      if (placed.length && (size.width > remainW + 0.01 || size.height > remainH + 0.01)) break;
 
       const leftoverW = remainW - size.width;
       const leftoverH = remainH - size.height;
